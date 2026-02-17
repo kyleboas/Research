@@ -1,0 +1,245 @@
+name: Weekly Report Pipeline
+
+on:
+  schedule:
+    - cron: "0 12 * * 1"
+  workflow_dispatch:
+    inputs:
+      from_stage:
+        description: "Stage to start from (manual fallback)"
+        required: true
+        default: ingestion
+        type: choice
+        options:
+          - ingestion
+          - embedding
+          - generation
+          - verification
+          - delivery
+      pipeline_run_id:
+        description: "Optional existing pipeline run id"
+        required: false
+        type: string
+
+jobs:
+  init:
+    runs-on: ubuntu-latest
+    outputs:
+      pipeline_run_id: ${{ steps.init.outputs.pipeline_run_id }}
+      run_ingestion: ${{ steps.init.outputs.run_ingestion }}
+      run_embedding: ${{ steps.init.outputs.run_embedding }}
+      run_generation: ${{ steps.init.outputs.run_generation }}
+      run_verification: ${{ steps.init.outputs.run_verification }}
+      run_delivery: ${{ steps.init.outputs.run_delivery }}
+    steps:
+      - name: Determine run configuration
+        id: init
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RUN_ID="${{ github.event.inputs.pipeline_run_id }}"
+          if [ -z "$RUN_ID" ]; then
+            RUN_ID="${{ github.run_id }}-${{ github.run_attempt }}"
+          fi
+
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            FROM_STAGE="ingestion"
+          else
+            FROM_STAGE="${{ github.event.inputs.from_stage }}"
+          fi
+
+          RUN_INGESTION=false
+          RUN_EMBEDDING=false
+          RUN_GENERATION=false
+          RUN_VERIFICATION=false
+          RUN_DELIVERY=false
+
+          case "$FROM_STAGE" in
+            ingestion)
+              RUN_INGESTION=true
+              RUN_EMBEDDING=true
+              RUN_GENERATION=true
+              RUN_VERIFICATION=true
+              RUN_DELIVERY=true
+              ;;
+            embedding)
+              RUN_EMBEDDING=true
+              RUN_GENERATION=true
+              RUN_VERIFICATION=true
+              RUN_DELIVERY=true
+              ;;
+            generation)
+              RUN_GENERATION=true
+              RUN_VERIFICATION=true
+              RUN_DELIVERY=true
+              ;;
+            verification)
+              RUN_VERIFICATION=true
+              RUN_DELIVERY=true
+              ;;
+            delivery)
+              RUN_DELIVERY=true
+              ;;
+            *)
+              echo "Unsupported from_stage: $FROM_STAGE" >&2
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "pipeline_run_id=$RUN_ID"
+            echo "run_ingestion=$RUN_INGESTION"
+            echo "run_embedding=$RUN_EMBEDDING"
+            echo "run_generation=$RUN_GENERATION"
+            echo "run_verification=$RUN_VERIFICATION"
+            echo "run_delivery=$RUN_DELIVERY"
+          } >> "$GITHUB_OUTPUT"
+
+  ingestion:
+    runs-on: ubuntu-latest
+    needs: init
+    if: ${{ needs.init.outputs.run_ingestion == 'true' }}
+    env:
+      PIPELINE_RUN_ID: ${{ needs.init.outputs.pipeline_run_id }}
+      POSTGRES_DSN: ${{ secrets.POSTGRES_DSN }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+      TRANSCRIPT_API_KEY: ${{ secrets.TRANSCRIPT_API_KEY }}
+      RSS_FEEDS_JSON: ${{ secrets.RSS_FEEDS_JSON }}
+      YOUTUBE_CHANNELS_JSON: ${{ secrets.YOUTUBE_CHANNELS_JSON }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run ingestion
+        run: |
+          mkdir -p logs
+          python -m src.pipeline --pipeline-run-id "$PIPELINE_RUN_ID" ingestion 2>&1 | tee logs/ingestion.log
+      - name: Upload ingestion logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ingestion-logs-${{ needs.init.outputs.pipeline_run_id }}
+          path: logs/ingestion.log
+
+  embedding:
+    runs-on: ubuntu-latest
+    needs: [init, ingestion]
+    if: ${{ needs.init.outputs.run_embedding == 'true' && (needs.init.outputs.run_ingestion != 'true' || needs.ingestion.result == 'success') }}
+    env:
+      PIPELINE_RUN_ID: ${{ needs.init.outputs.pipeline_run_id }}
+      POSTGRES_DSN: ${{ secrets.POSTGRES_DSN }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run embedding
+        run: |
+          mkdir -p logs
+          python -m src.pipeline --pipeline-run-id "$PIPELINE_RUN_ID" embedding --chunk-window-size 200 --chunk-overlap 40 --embedding-batch-size 64 2>&1 | tee logs/embedding.log
+      - name: Upload embedding logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: embedding-logs-${{ needs.init.outputs.pipeline_run_id }}
+          path: logs/embedding.log
+
+  generation:
+    runs-on: ubuntu-latest
+    needs: [init, embedding]
+    if: ${{ needs.init.outputs.run_generation == 'true' && (needs.init.outputs.run_embedding != 'true' || needs.embedding.result == 'success') }}
+    env:
+      PIPELINE_RUN_ID: ${{ needs.init.outputs.pipeline_run_id }}
+      POSTGRES_DSN: ${{ secrets.POSTGRES_DSN }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_CHAT_MODEL: ${{ secrets.OPENAI_CHAT_MODEL }}
+      REPORT_TOPIC: ${{ secrets.REPORT_TOPIC }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run generation
+        run: |
+          mkdir -p logs artifacts
+          python -m src.pipeline --pipeline-run-id "$PIPELINE_RUN_ID" generation --topic "$REPORT_TOPIC" --artifacts-dir artifacts/reports 2>&1 | tee logs/generation.log
+      - name: Upload generation logs and artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: generation-artifacts-${{ needs.init.outputs.pipeline_run_id }}
+          path: |
+            logs/generation.log
+            artifacts/reports/${{ needs.init.outputs.pipeline_run_id }}
+
+  verification:
+    runs-on: ubuntu-latest
+    needs: [init, generation]
+    if: ${{ needs.init.outputs.run_verification == 'true' && (needs.init.outputs.run_generation != 'true' || needs.generation.result == 'success') }}
+    env:
+      PIPELINE_RUN_ID: ${{ needs.init.outputs.pipeline_run_id }}
+      POSTGRES_DSN: ${{ secrets.POSTGRES_DSN }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_CHAT_MODEL: ${{ secrets.OPENAI_CHAT_MODEL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run verification
+        run: |
+          mkdir -p logs
+          python -m src.pipeline --pipeline-run-id "$PIPELINE_RUN_ID" verification 2>&1 | tee logs/verification.log
+      - name: Upload verification logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-logs-${{ needs.init.outputs.pipeline_run_id }}
+          path: logs/verification.log
+
+  delivery:
+    runs-on: ubuntu-latest
+    needs: [init, verification]
+    if: ${{ needs.init.outputs.run_delivery == 'true' && (needs.init.outputs.run_verification != 'true' || needs.verification.result == 'success') }}
+    env:
+      PIPELINE_RUN_ID: ${{ needs.init.outputs.pipeline_run_id }}
+      POSTGRES_DSN: ${{ secrets.POSTGRES_DSN }}
+      GITHUB_TOKEN: ${{ secrets.DELIVERY_GITHUB_TOKEN }}
+      GITHUB_OWNER: ${{ secrets.GITHUB_OWNER }}
+      GITHUB_REPO: ${{ secrets.GITHUB_REPO }}
+      GITHUB_DEFAULT_BRANCH: ${{ secrets.GITHUB_DEFAULT_BRANCH }}
+      DELIVERY_EMAIL_ENABLED: ${{ secrets.DELIVERY_EMAIL_ENABLED }}
+      DELIVERY_EMAIL_API_KEY: ${{ secrets.DELIVERY_EMAIL_API_KEY }}
+      DELIVERY_EMAIL_FROM: ${{ secrets.DELIVERY_EMAIL_FROM }}
+      DELIVERY_EMAIL_TO: ${{ secrets.DELIVERY_EMAIL_TO }}
+      DELIVERY_SLACK_ENABLED: ${{ secrets.DELIVERY_SLACK_ENABLED }}
+      DELIVERY_SLACK_WEBHOOK_URL: ${{ secrets.DELIVERY_SLACK_WEBHOOK_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run delivery
+        run: |
+          mkdir -p logs
+          python -m src.pipeline --pipeline-run-id "$PIPELINE_RUN_ID" delivery 2>&1 | tee logs/delivery.log
+      - name: Upload delivery logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: delivery-logs-${{ needs.init.outputs.pipeline_run_id }}
+          path: logs/delivery.log
