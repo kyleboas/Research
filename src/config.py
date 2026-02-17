@@ -20,6 +20,7 @@ class Settings:
     anthropic_api_key: str
     anthropic_model_id: str
     anthropic_small_model_id: str
+    anthropic_trend_model_id: str
 
     # OpenAI
     openai_api_key: str
@@ -56,6 +57,7 @@ def load_settings() -> Settings:
         anthropic_api_key=_get_env("ANTHROPIC_API_KEY", required=True),
         anthropic_model_id=_get_env("ANTHROPIC_MODEL_ID", default="claude-3-5-sonnet-latest"),
         anthropic_small_model_id=_get_env("ANTHROPIC_SMALL_MODEL_ID", default="claude-3-5-haiku-latest"),
+        anthropic_trend_model_id=_get_env("ANTHROPIC_TREND_MODEL_ID", default="claude-sonnet-4-6"),
         openai_api_key=_get_env("OPENAI_API_KEY", required=True),
         openai_embedding_model=_get_env("OPENAI_EMBEDDING_MODEL", default="text-embedding-3-large"),
         transcript_api_key=_get_env("TRANSCRIPT_API_KEY", required=True),
