@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import os
@@ -134,17 +135,26 @@ def run_ingestion(*, pipeline_run_id: str | None = None) -> str:
     return pipeline_run_id
 
 
-def run_embedding(*, pipeline_run_id: str | None = None) -> str:
+def run_embedding(
+    *,
+    pipeline_run_id: str | None = None,
+    window_size: int | None = None,
+    overlap: int | None = None,
+    embedding_batch_size: int | None = None,
+    embedding_model_override: str | None = None,
+) -> str:
     pipeline_run_id = pipeline_run_id or str(uuid.uuid4())
 
     start = time.perf_counter()
     _log_event(pipeline_run_id=pipeline_run_id, stage="embedding", event="start")
 
     settings = load_settings()
-    window_size = int(os.getenv("CHUNK_WINDOW_SIZE", "200"))
-    overlap = int(os.getenv("CHUNK_OVERLAP", "40"))
-    embedding_batch_size = int(os.getenv("EMBEDDING_BATCH_SIZE", "64"))
-    embedding_model_override = os.getenv("OPENAI_EMBEDDING_MODEL_OVERRIDE") or None
+    window_size = window_size if window_size is not None else int(os.getenv("CHUNK_WINDOW_SIZE", "200"))
+    overlap = overlap if overlap is not None else int(os.getenv("CHUNK_OVERLAP", "40"))
+    embedding_batch_size = (
+        embedding_batch_size if embedding_batch_size is not None else int(os.getenv("EMBEDDING_BATCH_SIZE", "64"))
+    )
+    embedding_model_override = embedding_model_override or os.getenv("OPENAI_EMBEDDING_MODEL_OVERRIDE") or None
 
     import psycopg
 
@@ -289,15 +299,20 @@ def run_embedding(*, pipeline_run_id: str | None = None) -> str:
     return pipeline_run_id
 
 
-def run_generation(*, pipeline_run_id: str | None = None) -> str:
+def run_generation(
+    *,
+    pipeline_run_id: str | None = None,
+    topic: str | None = None,
+    artifacts_dir: str | None = None,
+) -> str:
     pipeline_run_id = pipeline_run_id or str(uuid.uuid4())
     start = time.perf_counter()
     _log_event(pipeline_run_id=pipeline_run_id, stage="generation", event="start")
 
     settings = load_settings()
-    topic = os.getenv("REPORT_TOPIC", "Weekly AI research roundup")
-    artifacts_dir = Path(os.getenv("REPORT_ARTIFACTS_DIR", "artifacts/reports")) / pipeline_run_id
-    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    topic = topic or os.getenv("REPORT_TOPIC", "Weekly AI research roundup")
+    artifacts_dir_path = Path(artifacts_dir or os.getenv("REPORT_ARTIFACTS_DIR", "artifacts/reports")) / pipeline_run_id
+    artifacts_dir_path.mkdir(parents=True, exist_ok=True)
 
     import psycopg
 
@@ -339,10 +354,10 @@ def run_generation(*, pipeline_run_id: str | None = None) -> str:
             "revision_elapsed_s": round(revision_elapsed, 3),
         }
 
-        draft_path = artifacts_dir / "draft.md"
-        critique_path = artifacts_dir / "critique.md"
-        final_path = artifacts_dir / "final.md"
-        context_path = artifacts_dir / "context_packet.json"
+        draft_path = artifacts_dir_path / "draft.md"
+        critique_path = artifacts_dir_path / "critique.md"
+        final_path = artifacts_dir_path / "final.md"
+        context_path = artifacts_dir_path / "context_packet.json"
 
         draft_path.write_text(draft_markdown, encoding="utf-8")
         critique_path.write_text(critique_markdown, encoding="utf-8")
@@ -553,7 +568,7 @@ def _build_delivery_summary(*, title: str, verification_metadata: dict[str, obje
     return " | ".join(summary_parts)
 
 
-def run_delivery(*, pipeline_run_id: str | None = None) -> str:
+def run_delivery(*, pipeline_run_id: str | None = None, dry_run: bool | None = None) -> str:
     pipeline_run_id = pipeline_run_id or str(uuid.uuid4())
     start = time.perf_counter()
     _log_event(pipeline_run_id=pipeline_run_id, stage="delivery", event="start")
@@ -566,7 +581,7 @@ def run_delivery(*, pipeline_run_id: str | None = None) -> str:
     github_owner = os.getenv("GITHUB_OWNER", "")
     github_repo = os.getenv("GITHUB_REPO", "")
     github_branch = os.getenv("GITHUB_DEFAULT_BRANCH", "main")
-    dry_run = os.getenv("DELIVERY_DRY_RUN", "false").lower() == "true"
+    dry_run = dry_run if dry_run is not None else os.getenv("DELIVERY_DRY_RUN", "false").lower() == "true"
 
     if github_token == "" or github_owner == "" or github_repo == "":
         raise ValueError("GITHUB_TOKEN, GITHUB_OWNER, and GITHUB_REPO are required for delivery stage")
@@ -682,3 +697,64 @@ def run_all(*, pipeline_run_id: str | None = None) -> str:
     for stage in ("ingestion", "embedding", "generation", "verification", "delivery"):
         _run_stage(stage, pipeline_run_id)
     return pipeline_run_id
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run report pipeline stages")
+    parser.add_argument("--pipeline-run-id", default=None, help="Run identifier shared across stages")
+
+    subparsers = parser.add_subparsers(dest="stage", required=True)
+
+    subparsers.add_parser("ingestion", help="Run ingestion stage")
+
+    embedding_parser = subparsers.add_parser("embedding", help="Run embedding stage")
+    embedding_parser.add_argument("--chunk-window-size", type=int, default=None)
+    embedding_parser.add_argument("--chunk-overlap", type=int, default=None)
+    embedding_parser.add_argument("--embedding-batch-size", type=int, default=None)
+    embedding_parser.add_argument("--embedding-model", default=None)
+
+    generation_parser = subparsers.add_parser("generation", help="Run generation stage")
+    generation_parser.add_argument("--topic", default=None)
+    generation_parser.add_argument("--artifacts-dir", default=None)
+
+    subparsers.add_parser("verification", help="Run verification stage")
+
+    delivery_parser = subparsers.add_parser("delivery", help="Run delivery stage")
+    delivery_parser.add_argument("--dry-run", action="store_true", help="Publish outputs in dry-run mode")
+
+    subparsers.add_parser("all", help="Run all stages")
+    return parser
+
+
+def main() -> None:
+    parser = _build_parser()
+    args = parser.parse_args()
+
+    if args.stage == "ingestion":
+        pipeline_run_id = run_ingestion(pipeline_run_id=args.pipeline_run_id)
+    elif args.stage == "embedding":
+        pipeline_run_id = run_embedding(
+            pipeline_run_id=args.pipeline_run_id,
+            window_size=args.chunk_window_size,
+            overlap=args.chunk_overlap,
+            embedding_batch_size=args.embedding_batch_size,
+            embedding_model_override=args.embedding_model,
+        )
+    elif args.stage == "generation":
+        pipeline_run_id = run_generation(
+            pipeline_run_id=args.pipeline_run_id,
+            topic=args.topic,
+            artifacts_dir=args.artifacts_dir,
+        )
+    elif args.stage == "verification":
+        pipeline_run_id = run_verification(pipeline_run_id=args.pipeline_run_id)
+    elif args.stage == "delivery":
+        pipeline_run_id = run_delivery(pipeline_run_id=args.pipeline_run_id, dry_run=args.dry_run)
+    else:
+        pipeline_run_id = run_all(pipeline_run_id=args.pipeline_run_id)
+
+    print(pipeline_run_id)
+
+
+if __name__ == "__main__":
+    main()
