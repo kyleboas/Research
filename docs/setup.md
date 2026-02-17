@@ -28,9 +28,35 @@ Because this repository is a Python pipeline with Postgres, the practical iPhone
 
 ---
 
-## 2) Install dependencies in the codespace terminal
+## 2) Bootstrap with the setup script (recommended)
 
-Run:
+From the repository root, run:
+
+```bash
+bash scripts/setup.sh
+```
+
+This script will:
+
+- Create `.venv` if it does not already exist
+- Install required Python dependencies
+- Copy `.env.example` to `.env` (first run only)
+- Apply SQL files if `POSTGRES_DSN` is already exported and `psql` is installed
+
+Optional flags:
+
+```bash
+bash scripts/setup.sh --skip-pip
+bash scripts/setup.sh --skip-db
+```
+
+After the script finishes, edit `.env` and replace placeholder values with your real credentials.
+
+---
+
+## 3) Manual dependency install (fallback)
+
+If you prefer to run commands manually, use:
 
 ```bash
 python3 -m venv .venv
@@ -41,7 +67,7 @@ pip install anthropic openai "psycopg[binary]" pytest
 
 ---
 
-## 3) Provision Postgres (Supabase recommended on iPhone)
+## 4) Provision Postgres (Supabase recommended on iPhone)
 
 1. In Safari, open Supabase and create/select your project.
 2. Copy the Postgres connection string.
@@ -61,7 +87,7 @@ psql "$POSTGRES_DSN" -f sql/003_hybrid_search.sql
 
 ---
 
-## 4) Set required environment variables
+## 5) Set required environment variables
 
 In the codespace terminal, export all required variables:
 
@@ -107,7 +133,7 @@ export EMBEDDING_BATCH_SIZE="64"
 
 ---
 
-## 5) Verify setup
+## 6) Verify setup
 
 ```bash
 pytest -q
@@ -115,7 +141,7 @@ pytest -q
 
 ---
 
-## 6) Run the pipeline stage-by-stage
+## 7) Run the pipeline stage-by-stage
 
 Create one run ID:
 
@@ -145,7 +171,7 @@ artifacts/reports/<pipeline_run_id>/
 
 ---
 
-## 7) Optional: one-command run
+## 8) Optional: one-command run
 
 ```bash
 python -m src.pipeline all --pipeline-run-id "$RUN_ID"
@@ -155,7 +181,7 @@ Use `--dry-run` on delivery paths while validating credentials and permissions.
 
 ---
 
-## 8) iPhone-specific tips
+## 9) iPhone-specific tips
 
 - In Safari, long-press in terminal to paste API keys.
 - Keep a secure password manager open for key copy/paste.
@@ -165,7 +191,7 @@ Use `--dry-run` on delivery paths while validating credentials and permissions.
 
 ---
 
-## 9) Troubleshooting
+## 10) Troubleshooting
 
 - **`Missing required environment variable`**: one or more required `export` commands were missed.
 - **`psql: command not found`**: install PostgreSQL client in your cloud dev environment.
