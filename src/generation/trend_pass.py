@@ -63,7 +63,7 @@ def run_trend_pass(
 
     client = Anthropic(api_key=settings.anthropic_api_key)
     response = client.messages.create(
-        model="claude-sonnet-4-6",
+        model=settings.anthropic_trend_model_id,
         max_tokens=100,
         system=system_prompt,
         messages=[{"role": "user", "content": user_prompt}],
