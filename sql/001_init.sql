@@ -1,0 +1,2 @@
+-- Initial schema placeholder.
+-- Full schema will be added in Ticket 2.
