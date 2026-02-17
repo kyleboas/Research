@@ -20,7 +20,7 @@ Open your Supabase project → **SQL Editor**, then run each file in order:
 2. Copy and paste the contents of `sql/002_vector_indexes.sql` → **Run**
 3. Copy and paste the contents of `sql/003_hybrid_search.sql` → **Run**
 
-Then copy your **Postgres connection string** from Supabase: **Project Settings → Database → Connection string (URI mode)**.
+Then copy your **Postgres connection string** from Supabase: **Project Settings → Database → Connection string → URI tab**. It looks like `postgresql://postgres:[YOUR-PASSWORD]@db.<project-ref>.supabase.co:5432/postgres`.
 
 ---
 
@@ -35,8 +35,8 @@ Add each of the following:
 | Secret | Value |
 |---|---|
 | `SUPABASE_URL` | `https://<project>.supabase.co` |
-| `SUPABASE_SERVICE_ROLE_KEY` | From Supabase → Project Settings → API |
-| `POSTGRES_DSN` | Connection string from step 1 |
+| `SUPABASE_SERVICE_ROLE_KEY` | From Supabase → Project Settings → API → Project API keys → **`service_role` (Secret)** key |
+| `POSTGRES_DSN` | From Supabase → Project Settings → Database → Connection string → URI tab (see step 1) |
 | `ANTHROPIC_API_KEY` | Your Anthropic API key |
 | `OPENAI_API_KEY` | Your OpenAI API key |
 | `TRANSCRIPT_API_KEY` | Your transcript provider key |
