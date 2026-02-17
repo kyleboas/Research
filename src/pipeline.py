@@ -5,11 +5,15 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
 import time
 import uuid
 
 from .config import load_settings
+from .delivery.email import send_summary_email
+from .delivery.github_publish import publish_report_markdown
+from .delivery.slack import post_report_summary
 from .ingestion.dedupe import filter_existing_records, filter_existing_youtube_records
 from .ingestion.rss import fetch_all_feeds, load_feed_configs_from_env
 from .ingestion.youtube import fetch_all_channels, load_youtube_channel_configs_from_env
@@ -536,9 +540,140 @@ def run_verification(*, pipeline_run_id: str | None = None) -> str:
     return pipeline_run_id
 
 
+def _build_delivery_summary(*, title: str, verification_metadata: dict[str, object]) -> str:
+    quality_score = verification_metadata.get("quality_score")
+    total_claims = verification_metadata.get("total_claims")
+    supported_claims = verification_metadata.get("supported_claims")
+
+    summary_parts = [f"{title}"]
+    if quality_score is not None:
+        summary_parts.append(f"quality score: {quality_score}")
+    if total_claims is not None and supported_claims is not None:
+        summary_parts.append(f"supported claims: {supported_claims}/{total_claims}")
+    return " | ".join(summary_parts)
+
+
 def run_delivery(*, pipeline_run_id: str | None = None) -> str:
     pipeline_run_id = pipeline_run_id or str(uuid.uuid4())
-    _run_stage("delivery", pipeline_run_id)
+    start = time.perf_counter()
+    _log_event(pipeline_run_id=pipeline_run_id, stage="delivery", event="start")
+
+    postgres_dsn = os.getenv("POSTGRES_DSN", "")
+    if postgres_dsn == "":
+        raise ValueError("POSTGRES_DSN must be configured for delivery stage")
+
+    github_token = os.getenv("GITHUB_TOKEN", "")
+    github_owner = os.getenv("GITHUB_OWNER", "")
+    github_repo = os.getenv("GITHUB_REPO", "")
+    github_branch = os.getenv("GITHUB_DEFAULT_BRANCH", "main")
+    dry_run = os.getenv("DELIVERY_DRY_RUN", "false").lower() == "true"
+
+    if github_token == "" or github_owner == "" or github_repo == "":
+        raise ValueError("GITHUB_TOKEN, GITHUB_OWNER, and GITHUB_REPO are required for delivery stage")
+
+    import psycopg
+
+    with psycopg.connect(postgres_dsn) as connection:
+        with connection.cursor() as cursor:
+            if pipeline_run_id:
+                cursor.execute(
+                    """
+                    SELECT id, title, content, metadata, created_at
+                    FROM reports
+                    WHERE report_type = 'final'
+                      AND metadata ->> 'pipeline_run_id' = %s
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (pipeline_run_id,),
+                )
+                report_row = cursor.fetchone()
+            else:
+                report_row = None
+
+            if report_row is None:
+                cursor.execute(
+                    """
+                    SELECT id, title, content, metadata, created_at
+                    FROM reports
+                    WHERE report_type = 'final'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """
+                )
+                report_row = cursor.fetchone()
+
+    if report_row is None:
+        elapsed = time.perf_counter() - start
+        _log_event(
+            pipeline_run_id=pipeline_run_id,
+            stage="delivery",
+            event="complete",
+            elapsed_s=elapsed,
+            report_found=False,
+        )
+        return pipeline_run_id
+
+    _, title, markdown_content, metadata, created_at = report_row
+    report_metadata = metadata if isinstance(metadata, dict) else {}
+    verification_metadata = report_metadata.get("verification", {})
+    if not isinstance(verification_metadata, dict):
+        verification_metadata = {}
+
+    summary = _build_delivery_summary(title=title, verification_metadata=verification_metadata)
+
+    if isinstance(created_at, datetime):
+        created_at_dt = created_at
+    else:
+        created_at_dt = datetime.now()
+
+    github_result = publish_report_markdown(
+        report_markdown=markdown_content,
+        report_title=title,
+        report_created_at=created_at_dt,
+        github_token=github_token,
+        github_owner=github_owner,
+        github_repo=github_repo,
+        github_branch=github_branch,
+        dry_run=dry_run,
+    )
+
+    email_enabled = os.getenv("DELIVERY_EMAIL_ENABLED", "false").lower() == "true"
+    slack_enabled = os.getenv("DELIVERY_SLACK_ENABLED", "false").lower() == "true"
+
+    email_sent = False
+    if email_enabled:
+        email_result = send_summary_email(
+            report_title=title,
+            summary=summary,
+            report_url=github_result.html_url,
+            report_markdown=markdown_content,
+            dry_run=dry_run,
+        )
+        email_sent = email_result.delivered
+
+    slack_sent = False
+    if slack_enabled:
+        slack_result = post_report_summary(summary=summary, report_url=github_result.html_url, dry_run=dry_run)
+        slack_sent = slack_result.delivered
+
+    elapsed = time.perf_counter() - start
+    _log_event(
+        pipeline_run_id=pipeline_run_id,
+        stage="delivery",
+        event="complete",
+        elapsed_s=elapsed,
+        report_found=True,
+        report_title=title,
+        github_path=github_result.path,
+        github_url=github_result.html_url,
+        github_committed=github_result.committed,
+        dry_run=dry_run,
+        email_enabled=email_enabled,
+        email_sent=email_sent,
+        slack_enabled=slack_enabled,
+        slack_sent=slack_sent,
+    )
     return pipeline_run_id
 
 
