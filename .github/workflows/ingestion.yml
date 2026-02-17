@@ -18,8 +18,6 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.DELIVERY_GITHUB_TOKEN }}
       GITHUB_OWNER: ${{ secrets.GITHUB_OWNER }}
       GITHUB_REPO: ${{ secrets.GITHUB_REPO }}
-      RSS_FEEDS: ${{ secrets.RSS_FEEDS }}
-      YOUTUBE_CHANNELS: ${{ secrets.YOUTUBE_CHANNELS }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
