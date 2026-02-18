@@ -16,6 +16,7 @@ from .delivery.email import send_summary_email
 from .delivery.github_publish import publish_report_markdown
 from .delivery.slack import post_report_summary
 from .ingestion.dedupe import filter_existing_records, filter_existing_youtube_records
+from .ingestion.markdown import html_to_markdown
 from .ingestion.newsblur import fetch_newsblur_records, load_newsblur_config_from_env
 from .ingestion.youtube import fetch_all_channels, load_youtube_channel_configs_from_env
 from .generation.critique_pass import run_critique_pass
@@ -977,6 +978,88 @@ def run_delivery(*, pipeline_run_id: str | None = None, dry_run: bool | None = N
     return pipeline_run_id
 
 
+def _backfill_markdown_connection(connection: object, *, batch_size: int = 100) -> tuple[int, int]:
+    """Convert HTML in sources.metadata['content'] to markdown for one connection.
+
+    Returns ``(converted, skipped)`` counts.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT id, metadata
+            FROM sources
+            WHERE metadata ->> 'content' LIKE '%<%'
+            ORDER BY id
+            """
+        )
+        rows = cursor.fetchall()
+
+    converted = 0
+    skipped = 0
+
+    for source_id, metadata in rows:
+        content = metadata.get("content", "") if isinstance(metadata, dict) else ""
+        if not content or "<" not in content:
+            skipped += 1
+            continue
+
+        markdown = html_to_markdown(content)
+        if markdown == content:
+            skipped += 1
+            continue
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE sources
+                SET metadata = jsonb_set(metadata, '{content}', %s::jsonb)
+                WHERE id = %s
+                """,
+                (json.dumps(markdown), source_id),
+            )
+        converted += 1
+
+        if converted % batch_size == 0:
+            connection.commit()
+            LOGGER.info("backfill-markdown: converted %d sources so far", converted)
+
+    connection.commit()
+    return converted, skipped
+
+
+def run_backfill_markdown(*, pipeline_run_id: str | None = None, batch_size: int = 100) -> str:
+    """Convert existing HTML content in sources to markdown in-place.
+
+    Finds all sources whose ``metadata->>'content'`` contains HTML (detected by
+    the presence of ``<``), converts it with :func:`html_to_markdown`, and
+    writes the result back into ``sources.metadata``.
+
+    The ``updated_at`` trigger fires on each UPDATE, so the next run of the
+    embedding stage will automatically re-chunk and re-embed those sources.
+    """
+    pipeline_run_id = pipeline_run_id or str(uuid.uuid4())
+    start = time.perf_counter()
+    _log_event(pipeline_run_id=pipeline_run_id, stage="backfill-markdown", event="start")
+
+    settings = load_settings()
+
+    import psycopg
+
+    with psycopg.connect(settings.postgres_dsn) as connection:
+        converted, skipped = _backfill_markdown_connection(connection, batch_size=batch_size)
+
+    elapsed = time.perf_counter() - start
+    _log_event(
+        pipeline_run_id=pipeline_run_id,
+        stage="backfill-markdown",
+        event="complete",
+        elapsed_s=elapsed,
+        sources_converted=converted,
+        sources_skipped=skipped,
+    )
+    return pipeline_run_id
+
+
 def run_all(*, pipeline_run_id: str | None = None) -> str:
     pipeline_run_id = pipeline_run_id or str(uuid.uuid4())
     for stage in ("ingestion", "embedding", "generation", "verification", "delivery"):
@@ -1008,6 +1091,18 @@ def _build_parser() -> argparse.ArgumentParser:
     delivery_parser.add_argument("--dry-run", action="store_true", help="Publish outputs in dry-run mode")
 
     subparsers.add_parser("all", help="Run all stages")
+
+    backfill_parser = subparsers.add_parser(
+        "backfill-markdown",
+        help="Convert existing HTML content in sources to markdown (one-time migration)",
+    )
+    backfill_parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=100,
+        help="Commit after every N converted rows (default: 100)",
+    )
+
     return parser
 
 
@@ -1035,6 +1130,11 @@ def main() -> None:
         pipeline_run_id = run_verification(pipeline_run_id=args.pipeline_run_id)
     elif args.stage == "delivery":
         pipeline_run_id = run_delivery(pipeline_run_id=args.pipeline_run_id, dry_run=args.dry_run)
+    elif args.stage == "backfill-markdown":
+        pipeline_run_id = run_backfill_markdown(
+            pipeline_run_id=args.pipeline_run_id,
+            batch_size=args.batch_size,
+        )
     else:
         pipeline_run_id = run_all(pipeline_run_id=args.pipeline_run_id)
 
