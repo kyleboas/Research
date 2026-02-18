@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import time
+from socket import gaierror
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -333,6 +334,20 @@ def poll_channel_videos(
     return sorted(records, key=lambda record: (record.channel_id, record.video_id, record.title)), missing_transcripts, None
 
 
+
+
+def _is_dns_resolution_error(exc: Exception) -> bool:
+    """Return ``True`` when an exception chain contains a DNS lookup failure."""
+
+    current: BaseException | None = exc
+    while current is not None:
+        if isinstance(current, gaierror):
+            return True
+        if isinstance(current, URLError) and isinstance(current.reason, gaierror):
+            return True
+        current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+    return False
+
 def fetch_all_channels(
     channel_configs: Iterable[YouTubeChannelConfig],
     *,
@@ -341,7 +356,8 @@ def fetch_all_channels(
 ) -> tuple[list[YouTubeRecord], int, int]:
     """Poll all configured channels and return records + failed channels + missing transcripts."""
 
-    base_url = provider_base_url or os.getenv("TRANSCRIPT_API_BASE_URL", "https://transcriptapi.com/api/v2")
+    default_base_url = "https://transcriptapi.com/api/v2"
+    configured_base_url = provider_base_url or os.getenv("TRANSCRIPT_API_BASE_URL", default_base_url)
 
     records: list[YouTubeRecord] = []
     failed_channels = 0
@@ -351,8 +367,22 @@ def fetch_all_channels(
         channel_records, channel_missing, error = poll_channel_videos(
             channel,
             api_key=api_key,
-            provider_base_url=base_url,
+            provider_base_url=configured_base_url,
         )
+
+        # Fallback for misconfigured/invalid hostnames in TRANSCRIPT_API_BASE_URL.
+        if error is not None and configured_base_url != default_base_url and _is_dns_resolution_error(error):
+            LOGGER.warning(
+                "Transcript provider hostname lookup failed for '%s'; retrying '%s' with default endpoint.",
+                configured_base_url,
+                channel.name,
+            )
+            channel_records, channel_missing, error = poll_channel_videos(
+                channel,
+                api_key=api_key,
+                provider_base_url=default_base_url,
+            )
+
         failed_channels += int(error is not None)
         missing_transcripts += channel_missing
         records.extend(channel_records)
