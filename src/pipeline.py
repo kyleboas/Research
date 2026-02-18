@@ -299,9 +299,6 @@ def _source_metadata(record: object) -> dict[str, object]:
         if value not in (None, ""):
             metadata[attribute] = value
 
-    if "feed_name" in metadata:
-        metadata["feed"] = metadata.pop("feed_name")
-
     return metadata
 
 
