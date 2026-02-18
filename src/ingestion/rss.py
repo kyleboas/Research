@@ -16,6 +16,8 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
+from .markdown import html_to_markdown
+
 LOGGER = logging.getLogger("research.ingestion.rss")
 
 
@@ -124,7 +126,9 @@ def _parse_atom_items(root: ET.Element, feed_name: str) -> list[RSSRecord]:
         url = (link.attrib.get("href", "") if link is not None else "").strip()
         guid = _text(entry.find("atom:id", RSS_NS)) or None
         published_at = _parse_datetime(_text(entry.find("atom:published", RSS_NS)) or _text(entry.find("atom:updated", RSS_NS)))
-        content = _text(entry.find("atom:content", RSS_NS)) or _text(entry.find("atom:summary", RSS_NS))
+        content = html_to_markdown(
+            _text(entry.find("atom:content", RSS_NS)) or _text(entry.find("atom:summary", RSS_NS))
+        )
         source_key = _stable_source_key(guid=guid, url=url, title=title, published_at=published_at, feed_name=feed_name)
         records.append(
             RSSRecord(
@@ -148,7 +152,9 @@ def _parse_rss_items(root: ET.Element, feed_name: str) -> list[RSSRecord]:
         url = _text(item.find("link"))
         guid = _text(item.find("guid")) or None
         published_at = _parse_datetime(_text(item.find("pubDate")))
-        content = _text(item.find("content:encoded", RSS_NS)) or _text(item.find("description"))
+        content = html_to_markdown(
+            _text(item.find("content:encoded", RSS_NS)) or _text(item.find("description"))
+        )
         source_key = _stable_source_key(guid=guid, url=url, title=title, published_at=published_at, feed_name=feed_name)
         records.append(
             RSSRecord(

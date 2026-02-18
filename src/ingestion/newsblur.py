@@ -13,6 +13,7 @@ import time
 from urllib.parse import urlencode
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
+from .markdown import html_to_markdown
 from .rss import RSSRecord
 
 LOGGER = logging.getLogger("research.ingestion.newsblur")
@@ -171,13 +172,17 @@ def _story_to_rss_record(story: dict, *, fetch_full_text: "((str) -> str) | None
                 continue
 
     # Content — prefer the full ``story_content``, fall back to summary.
-    content = (story.get("story_content") or story.get("story_summary") or "").strip()
+    # Convert HTML to markdown to strip tag noise before storing, which
+    # reduces tokens consumed when chunks are later fed to the LLM.
+    content = html_to_markdown(
+        (story.get("story_content") or story.get("story_summary") or "").strip()
+    )
 
     # Optionally enrich with reader-mode full text when content is absent.
     if fetch_full_text and not content:
         story_hash = story.get("story_hash") or ""
         if story_hash:
-            content = fetch_full_text(story_hash)
+            content = html_to_markdown(fetch_full_text(story_hash))
 
     # Stable source key mirrors the logic in rss._stable_source_key.
     if guid:
