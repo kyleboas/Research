@@ -1,6 +1,6 @@
 ---
 name: prd
-description: Generate a PRD in /tasks/prd-<feature-name>.md by first asking 3–5 essential clarifying questions with A/B/C options, then writing a junior-dev-friendly PRD in Markdown.
+description: Generate a PRD and Task list in /tasks/prd-<feature-name>.md and /tasks/tasks-<feature-name>.md by first asking 3–5 essential clarifying questions with A/B/C options, then writing a junior-dev-friendly PRD and Task List in Markdown.
 disable-model-invocation: true
 ---
 
