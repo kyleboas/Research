@@ -309,8 +309,8 @@ def _insert_sources(connection: object, records: list[object]) -> int:
     with connection.cursor() as cursor:
         cursor.executemany(
             """
-            INSERT INTO sources (source_type, source_key, title, published_at, metadata)
-            VALUES (%s, %s, %s, %s, %s::jsonb)
+            INSERT INTO sources (source_type, source_key, title, author, published_at, metadata)
+            VALUES (%s, %s, %s, %s, %s, %s::jsonb)
             ON CONFLICT (source_type, source_key) DO NOTHING
             """,
             [
@@ -318,6 +318,7 @@ def _insert_sources(connection: object, records: list[object]) -> int:
                     record.source_type,
                     record.source_key,
                     record.title,
+                    getattr(record, "feed_name", None) or None,
                     record.published_at,
                     json.dumps(_source_metadata(record)),
                 )
