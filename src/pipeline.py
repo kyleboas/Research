@@ -16,6 +16,7 @@ from .delivery.email import send_summary_email
 from .delivery.github_publish import publish_report_markdown
 from .delivery.slack import post_report_summary
 from .ingestion.dedupe import filter_existing_records, filter_existing_youtube_records
+from .ingestion.newsblur import fetch_newsblur_records, load_newsblur_config_from_env
 from .ingestion.rss import fetch_all_feeds, load_feed_configs_from_env
 from .ingestion.youtube import fetch_all_channels, load_youtube_channel_configs_from_env
 from .generation.critique_pass import run_critique_pass
@@ -260,10 +261,19 @@ def run_ingestion(*, pipeline_run_id: str | None = None) -> str:
         api_key=settings.transcript_api_key,
     )
 
+    newsblur_config = load_newsblur_config_from_env()
+    newsblur_records: list = []
+    failed_newsblur = 0
+    if newsblur_config is not None:
+        newsblur_records, nb_error = fetch_newsblur_records(newsblur_config)
+        failed_newsblur = int(nb_error is not None)
+
+    all_rss_records = [*rss_records, *newsblur_records]
+
     import psycopg
 
     with psycopg.connect(settings.postgres_dsn) as connection:
-        deduped_rss = filter_existing_records(connection, rss_records)
+        deduped_rss = filter_existing_records(connection, all_rss_records)
         deduped_youtube = filter_existing_youtube_records(connection, youtube_records)
         inserted = _insert_sources(connection, [*deduped_rss.new_records, *deduped_youtube.new_records])
         _persist_stage_cost_metrics(
@@ -285,11 +295,13 @@ def run_ingestion(*, pipeline_run_id: str | None = None) -> str:
         event="complete",
         elapsed_s=elapsed,
         fetched_rss=len(rss_records),
+        fetched_newsblur=len(newsblur_records),
         fetched_youtube=len(youtube_records),
         deduped_rss=len(deduped_rss.duplicate_records),
         deduped_youtube=len(deduped_youtube.duplicate_records),
         inserted=inserted,
         failed_rss=failed_feeds,
+        failed_newsblur=failed_newsblur,
         failed_youtube=failed_channels,
         missing_youtube_transcripts=missing_transcripts,
     )
