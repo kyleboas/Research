@@ -69,33 +69,40 @@ def _persist_stage_cost_metrics(
     with connection.cursor() as cursor:
         cursor.execute(
             """
-            SELECT EXISTS (
-                SELECT 1
-                FROM information_schema.columns
-                WHERE table_schema = current_schema()
-                  AND table_name = 'pipeline_runs'
-                  AND column_name = 'cost_estimate_json'
-            )
+            SELECT
+                MAX(CASE WHEN column_name = 'metadata' THEN 1 ELSE 0 END) = 1 AS has_metadata,
+                MAX(CASE WHEN column_name = 'cost_estimate_json' THEN 1 ELSE 0 END) = 1 AS has_cost_estimate_json
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'pipeline_runs'
+              AND column_name IN ('metadata', 'cost_estimate_json')
             """
         )
-        has_cost_column = bool(cursor.fetchone()[0])
+        has_metadata_column, has_cost_column = (bool(value) for value in cursor.fetchone())
+
+        select_columns = ["id"]
+        if has_metadata_column:
+            select_columns.append("metadata")
+        if has_cost_column:
+            select_columns.append("cost_estimate_json")
 
         cursor.execute(
-            """
-            SELECT id, metadata, CASE WHEN %s THEN cost_estimate_json ELSE NULL END
+            f"""
+            SELECT {', '.join(select_columns)}
             FROM pipeline_runs
             WHERE run_name = %s
             ORDER BY id DESC
             LIMIT 1
             """,
-            (has_cost_column, pipeline_run_id),
+            (pipeline_run_id,),
         )
         row = cursor.fetchone()
-        if row is not None and len(row) != 3:
+        expected_columns = 1 + int(has_metadata_column) + int(has_cost_column)
+        if row is not None and len(row) != expected_columns:
             return
 
         if row is None:
-            if has_cost_column:
+            if has_cost_column and has_metadata_column:
                 cursor.execute(
                     """
                     INSERT INTO pipeline_runs (run_name, status, metadata, cost_estimate_json)
@@ -104,7 +111,7 @@ def _persist_stage_cost_metrics(
                     """,
                     (pipeline_run_id, "running", json.dumps({"pipeline_run_id": pipeline_run_id}), json.dumps({})),
                 )
-            else:
+            elif has_metadata_column:
                 cursor.execute(
                     """
                     INSERT INTO pipeline_runs (run_name, status, metadata)
@@ -113,11 +120,35 @@ def _persist_stage_cost_metrics(
                     """,
                     (pipeline_run_id, "running", json.dumps({"pipeline_run_id": pipeline_run_id})),
                 )
+            elif has_cost_column:
+                cursor.execute(
+                    """
+                    INSERT INTO pipeline_runs (run_name, status, cost_estimate_json)
+                    VALUES (%s, %s, %s::jsonb)
+                    RETURNING id
+                    """,
+                    (pipeline_run_id, "running", json.dumps({})),
+                )
+            else:
+                cursor.execute(
+                    """
+                    INSERT INTO pipeline_runs (run_name, status)
+                    VALUES (%s, %s)
+                    RETURNING id
+                    """,
+                    (pipeline_run_id, "running"),
+                )
             run_id = cursor.fetchone()[0]
             existing_metadata: dict[str, object] = {"pipeline_run_id": pipeline_run_id}
             existing_cost: dict[str, object] = {}
         else:
-            run_id, existing_metadata, existing_cost = row
+            row_index = 0
+            run_id = row[row_index]
+            row_index += 1
+            existing_metadata = row[row_index] if has_metadata_column else {}
+            if has_metadata_column:
+                row_index += 1
+            existing_cost = row[row_index] if has_cost_column else {}
             if not isinstance(existing_metadata, dict):
                 existing_metadata = {}
             if not isinstance(existing_cost, dict):
@@ -148,18 +179,34 @@ def _persist_stage_cost_metrics(
         }
 
         if has_cost_column:
+            set_clauses = ["cost_estimate_json = %s::jsonb"]
+            params: list[object] = [json.dumps(updated_cost)]
+            if has_metadata_column:
+                set_clauses.append("metadata = %s::jsonb")
+                params.append(json.dumps({**existing_metadata, "pipeline_run_id": pipeline_run_id}))
+            set_clauses.extend(["status = %s", "finished_at = CASE WHEN %s = 'delivery' THEN NOW() ELSE finished_at END"])
+            params.extend(["completed" if stage == "delivery" else "running", stage, run_id])
+            cursor.execute(
+                f"""
+                UPDATE pipeline_runs
+                SET {', '.join(set_clauses)}
+                WHERE id = %s
+                """,
+                tuple(params),
+            )
+            return
+
+        if has_metadata_column:
             cursor.execute(
                 """
                 UPDATE pipeline_runs
-                SET cost_estimate_json = %s::jsonb,
-                    metadata = %s::jsonb,
+                SET metadata = %s::jsonb,
                     status = %s,
                     finished_at = CASE WHEN %s = 'delivery' THEN NOW() ELSE finished_at END
                 WHERE id = %s
                 """,
                 (
-                    json.dumps(updated_cost),
-                    json.dumps({**existing_metadata, "pipeline_run_id": pipeline_run_id}),
+                    json.dumps({**existing_metadata, "pipeline_run_id": pipeline_run_id, "cost_estimate_json": updated_cost}),
                     "completed" if stage == "delivery" else "running",
                     stage,
                     run_id,
@@ -170,13 +217,11 @@ def _persist_stage_cost_metrics(
         cursor.execute(
             """
             UPDATE pipeline_runs
-            SET metadata = %s::jsonb,
-                status = %s,
+            SET status = %s,
                 finished_at = CASE WHEN %s = 'delivery' THEN NOW() ELSE finished_at END
             WHERE id = %s
             """,
             (
-                json.dumps({**existing_metadata, "pipeline_run_id": pipeline_run_id, "cost_estimate_json": updated_cost}),
                 "completed" if stage == "delivery" else "running",
                 stage,
                 run_id,
