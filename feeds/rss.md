@@ -18,6 +18,10 @@
 
 ## 2. Analysis
 
+- **Absolute Unit**
+  - Feed: https://absoluteunit.substack.com/feed
+  - Site: https://absoluteunit.substack.com
+
 - **Ahmed Walid - The Athletic**
   - Feed: https://www.nytimes.com/athletic/rss/author/ahmed-walid/
   - Site: https://www.nytimes.com/athletic/author/ahmed-walid/
@@ -30,9 +34,21 @@
   - Feed: https://analyticsunited.co.uk/feed/
   - Site: https://analyticsunited.co.uk
 
+- **Ball Don't Lai**
+  - Feed: https://marcolai.substack.com/feed
+  - Site: https://marcolai.substack.com
+
+- **BarcaFutbol**
+  - Feed: https://barcafutbol.substack.com/feed
+  - Site: https://barcafutbol.substack.com
+
 - **benfootballtheatre**
   - Feed: https://benfootballtheatre.wordpress.com/feed/
   - Site: https://benfootballtheatre.wordpress.com
+
+- **Billy's BBQ**
+  - Feed: https://billycarpenter.substack.com/feed
+  - Site: https://billycarpenter.substack.com
 
 - **Cano Football**
   - Feed: https://www.canofootball.com/feed/
@@ -45,6 +61,10 @@
 - **Central Winger**
   - Feed: https://www.centralwinger.com/feed
   - Site: https://www.centralwinger.com
+
+- **Charlotte Soccer City**
+  - Feed: https://charlottesoccercity.substack.com/feed
+  - Site: https://charlottesoccercity.substack.com
 
 - **Coaches' Voice**
   - Feed: https://learning.coachesvoice.com/feed/
