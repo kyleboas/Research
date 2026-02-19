@@ -31,12 +31,15 @@ class _Cursor:
         self.connection.claim_rows.extend(rows)
 
     def fetchone(self):
+        if "information_schema.columns" in self._last_query.lower():
+            return (True, True, True)
         if self.connection._selected_run == "run-1":
             return (
                 77,
                 "Supported claim with overlap tokens [S1:C10].\nUnsupported claim text [S1:C20].",
             )
         return None
+
 
     def fetchall(self):
         if "FROM chunks" in self._last_query:
@@ -82,7 +85,9 @@ def _settings() -> Settings:
         postgres_dsn="postgresql://example",
         anthropic_api_key="anthropic-key",
         anthropic_model_id="model",
+        anthropic_lead_model_id="lead-model",
         anthropic_small_model_id="small-model",
+        anthropic_trend_model_id="trend-model",
         openai_api_key="openai-key",
         openai_embedding_model="embed",
         transcript_api_key="transcript-key",
