@@ -64,6 +64,14 @@ Set `RESEARCH_LOG_LEVEL` to control runtime log verbosity across pipeline stages
 RESEARCH_LOG_LEVEL=INFO
 ```
 
+## Key environment variables
+
+In addition to existing Anthropic/OpenAI/database credentials, the lead-agent planner now supports an optional override model:
+
+- `ANTHROPIC_LEAD_MODEL_ID` (optional, defaults to `claude-opus-4-6`)
+
+If unset, the pipeline still uses the standard defaults from `src/settings.md`.
+
 ## Testing
 
 ```bash

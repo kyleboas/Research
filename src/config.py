@@ -21,6 +21,7 @@ class Settings:
     # Anthropic
     anthropic_api_key: str
     anthropic_model_id: str
+    anthropic_lead_model_id: str
     anthropic_small_model_id: str
     anthropic_trend_model_id: str
 
@@ -116,6 +117,7 @@ def load_settings() -> Settings:
         postgres_dsn=_get_env("POSTGRES_DSN", required=True),
         anthropic_api_key=_get_env("ANTHROPIC_API_KEY", required=True),
         anthropic_model_id=_get_env("ANTHROPIC_MODEL_ID", default=_md("ANTHROPIC_MODEL_ID", "claude-3-5-sonnet-latest")),
+        anthropic_lead_model_id=_get_env("ANTHROPIC_LEAD_MODEL_ID", default=_md("ANTHROPIC_LEAD_MODEL_ID", "claude-opus-4-6")),
         anthropic_small_model_id=_get_env("ANTHROPIC_SMALL_MODEL_ID", default=_md("ANTHROPIC_SMALL_MODEL_ID", "claude-3-5-haiku-latest")),
         anthropic_trend_model_id=_get_env("ANTHROPIC_TREND_MODEL_ID", default=_md("ANTHROPIC_TREND_MODEL_ID", "claude-sonnet-4-6")),
         openai_api_key=_get_env("OPENAI_API_KEY", required=True),
