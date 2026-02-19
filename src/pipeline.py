@@ -218,7 +218,7 @@ def _persist_stage_cost_metrics(
             "stages": stages,
             "total_token_count": total_tokens,
             "total_estimated_cost_usd": round(total_cost, 6),
-            "updated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "updated_at": datetime.now(datetime.UTC).isoformat(timespec="seconds"),
         }
 
         if has_cost_column:
