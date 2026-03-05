@@ -21,18 +21,22 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
 ROOT = Path(__file__).resolve().parent
 GATEWAY = os.environ["CLOUDFLARE_GATEWAY_URL"].rstrip("/")
+GATEWAY_TOKEN = os.environ["CLOUDFLARE_GATEWAY_TOKEN"]
 TRANSCRIPT_KEY = os.environ["TRANSCRIPT_API_KEY"]
 LEAD_MODEL = os.environ.get("CLAUDE_LEAD_MODEL", "claude-opus-4-6")
 MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "text-embedding-3-small")
 
+_gw_headers = {"cf-aig-authorization": f"Bearer {GATEWAY_TOKEN}"}
 claude = anthropic.Anthropic(
     api_key=os.environ.get("ANTHROPIC_API_KEY", "cloudflare"),
     base_url=f"{GATEWAY}/anthropic",
+    default_headers=_gw_headers,
 )
 oai = openai.OpenAI(
     api_key=os.environ.get("OPENAI_API_KEY", "cloudflare"),
     base_url=f"{GATEWAY}/openai",
+    default_headers=_gw_headers,
 )
 
 CITATION_FMT = "Cite every claim as [S<source_id>:C<chunk_id>]. Never cite IDs not in the provided context."

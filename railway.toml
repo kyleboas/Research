@@ -18,8 +18,11 @@ builder = "nixpacks"
 #     Cron schedule: 0 6 * * *     (daily at 6am)
 #
 # All three services share the same environment variables:
-#   CLOUDFLARE_GATEWAY_URL, POSTGRES_DSN, TRANSCRIPT_API_KEY
+#   CLOUDFLARE_GATEWAY_URL, CLOUDFLARE_GATEWAY_TOKEN, POSTGRES_DSN, TRANSCRIPT_API_KEY
 # (Anthropic and OpenAI keys are stored as credentials in the Cloudflare dashboard)
+#
+# For POSTGRES_DSN: add a Railway Postgres service to your project, then use
+# the ${{Postgres.DATABASE_URL}} reference variable — Railway injects it automatically.
 #
 # Run the updated sql/schema.sql in Supabase first to add the pipeline_state table.
 
