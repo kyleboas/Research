@@ -17,14 +17,17 @@ builder = "nixpacks"
 #     PIPELINE_STEP=report
 #     Cron schedule: 0 6 * * *     (daily at 6am)
 #
-# All three services share the same environment variables:
-#   CLOUDFLARE_GATEWAY_URL, CLOUDFLARE_GATEWAY_TOKEN, POSTGRES_DSN, TRANSCRIPT_API_KEY
-# (Anthropic and OpenAI keys are stored as credentials in the Cloudflare dashboard)
+# Set these variables in Railway's Variables tab for all three services:
 #
-# For POSTGRES_DSN: add a Railway Postgres service to your project, then use
-# the ${{Postgres.DATABASE_URL}} reference variable — Railway injects it automatically.
+#   CLOUDFLARE_GATEWAY_URL   https://gateway.ai.cloudflare.com/v1/ACCOUNT/GATEWAY
+#   CLOUDFLARE_GATEWAY_TOKEN your-gateway-token
+#   POSTGRES_DSN             ${{Postgres.DATABASE_URL}}   ← Railway reference variable
+#   TRANSCRIPT_API_KEY       your-transcript-api-key
 #
-# Run the updated sql/schema.sql in Supabase first to add the pipeline_state table.
+# Anthropic and OpenAI keys are stored as credentials in the Cloudflare dashboard.
+#
+# After first deploy, run sql/schema.sql via Railway's Postgres query console
+# (or psql) to create the tables.
 
 startCommand = "python main.py --step ${PIPELINE_STEP:-all}"
 restartPolicyType = "never"
