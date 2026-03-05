@@ -1,0 +1,27 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+# Each Railway service reads PIPELINE_STEP from its environment variables.
+# Create three services in the Railway dashboard, all pointing to this repo:
+#
+#   Service: ingest
+#     PIPELINE_STEP=ingest
+#     Cron schedule: 0 */2 * * *   (every 2 hours)
+#
+#   Service: detect
+#     PIPELINE_STEP=detect
+#     Cron schedule: 0 */4 * * *   (every 4 hours)
+#
+#   Service: report
+#     PIPELINE_STEP=report
+#     Cron schedule: 0 6 * * *     (daily at 6am)
+#
+# All three services share the same environment variables:
+#   ANTHROPIC_API_KEY, OPENAI_API_KEY, POSTGRES_DSN,
+#   CLOUDFLARE_GATEWAY_URL, TRANSCRIPT_API_KEY
+#
+# Run the updated sql/schema.sql in Supabase first to add the pipeline_state table.
+
+startCommand = "python main.py --step ${PIPELINE_STEP:-all}"
+restartPolicyType = "never"
