@@ -27,11 +27,11 @@ MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "text-embedding-3-small")
 
 claude = anthropic.Anthropic(
-    api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
+    api_key=os.environ.get("ANTHROPIC_API_KEY", "cloudflare"),
     base_url=f"{GATEWAY}/anthropic",
 )
 oai = openai.OpenAI(
-    api_key=os.environ.get("OPENAI_API_KEY", ""),
+    api_key=os.environ.get("OPENAI_API_KEY", "cloudflare"),
     base_url=f"{GATEWAY}/openai",
 )
 
