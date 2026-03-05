@@ -1,87 +1,87 @@
-# Research
+# Football Research Pipeline
 
-Autonomous weekly research pipeline for LLM ecosystem updates. The system ingests RSS + YouTube sources, chunks and embeds content for hybrid retrieval, generates a cited markdown report through multi-pass drafting, verifies extracted claims, and publishes output to delivery channels.
+Automatic deep research system that ingests football content, detects novel tactical trends, and generates production-grade sourced reports using multi-agent orchestration.
 
-## What it does
+Architecture mirrors [Anthropic's multi-agent research system](https://www.anthropic.com/engineering/multi-agent-research-system).
 
-- **Ingestion**: pulls configured RSS feeds and YouTube channel transcripts.
-- **Processing**: performs deterministic chunking and embedding upserts.
-- **Generation**: runs research/draft/critique/revision passes to produce a final report.
-- **Verification**: extracts claims and scores support confidence.
-- **Delivery**: supports GitHub, email, and Slack publishing flows.
+## How it works
 
-## Repository layout
+1. **Ingest** — Fetches RSS feeds and YouTube transcripts every 2 hours, stores full content in Supabase Postgres with vector embeddings.
+2. **Detect** — Uses Claude to identify novel tactics being tried by players/teams before they become mainstream.
+3. **Report** — Multi-agent deep research pipeline:
 
-- `src/` — pipeline stages and integrations.
-- `sql/` — schema, vector indexes, and hybrid retrieval SQL.
-- `feeds/` — source-list markdown files.
-- `tests/` — unit and flow tests.
-- `docs/` — setup, runbook, architecture, and planning docs.
+```
+┌─────────────────────────────────────────────────────┐
+│ LeadResearcher (Opus + extended thinking)            │
+│ - Assesses complexity (simple/moderate/complex)      │
+│ - Decomposes into non-overlapping research angles    │
+│ - Calibrates subagent count + retrieval depth        │
+└───────────────────────┬─────────────────────────────┘
+                        │
+                        ▼
+┌─────────────────────────────────────────────────────┐
+│ Parallel Subagents (Sonnet × N)                     │
+│ OODA loop per angle:                                │
+│   Observe: hybrid search (semantic + keyword RRF)   │
+│   Orient:  evaluate coverage vs objective           │
+│   Decide:  generate narrower query or stop          │
+│   Act:     retrieve again (up to 5 rounds)          │
+└───────────────────────┬─────────────────────────────┘
+                        │
+                        ▼
+┌─────────────────────────────────────────────────────┐
+│ Synthesis                                           │
+│ Merge all subagent outputs into cohesive draft      │
+└───────────────────────┬─────────────────────────────┘
+                        │
+                        ▼
+┌─────────────────────────────────────────────────────┐
+│ Sufficiency Evaluation (LeadResearcher re-planning) │
+│ - Evaluates draft quality with extended thinking    │
+│ - If gaps found: spawn MORE subagents → re-synth   │
+│ - Up to 2 research rounds                          │
+└───────────────────────┬─────────────────────────────┘
+                        │
+                        ▼
+┌─────────────────────────────────────────────────────┐
+│ CitationAgent                                       │
+│ Verifies every [S:C] tag maps to real evidence      │
+│ Flags hallucinated IDs, uncited claims, mismatches  │
+└───────────────────────┬─────────────────────────────┘
+                        │
+                        ▼
+┌─────────────────────────────────────────────────────┐
+│ Revision Editor                                     │
+│ Applies all citation fixes, qualifies speculation,  │
+│ produces final publication-quality report            │
+└─────────────────────────────────────────────────────┘
+```
+
+All API calls route through **Cloudflare AI Gateway**.
 
 ## Setup
 
-Use the iPhone-friendly setup guide (works for desktop/codespaces too):
+1. Run `sql/schema.sql` in your Supabase SQL editor (enable pgvector first).
+2. Copy `env.example` to `.env` and fill in your keys.
+3. `pip install -r requirements.txt`
+4. `python main.py`
 
-- [`docs/setup.md`](docs/setup.md)
-
-## Run the pipeline
-
-After configuring environment variables and database schema:
-
-```bash
-RUN_ID="$(python - <<'PY'
-import uuid
-print(uuid.uuid4())
-PY
-)"
-
-python -m src.pipeline ingestion --pipeline-run-id "$RUN_ID"
-python -m src.pipeline embedding --pipeline-run-id "$RUN_ID"
-python -m src.pipeline generation --pipeline-run-id "$RUN_ID"
-python -m src.pipeline verification --pipeline-run-id "$RUN_ID"
-python -m src.pipeline delivery --pipeline-run-id "$RUN_ID" --dry-run
-```
-
-Or run all stages in one command:
+## Cron (every 2 hours)
 
 ```bash
-python -m src.pipeline all --pipeline-run-id "$RUN_ID"
+0 */2 * * * cd /path/to/research && /path/to/python main.py >> logs/run.log 2>&1
 ```
 
-## RSS troubleshooting
+## Feeds
 
-Some feeds block specific bot user-agents and return `HTTP 403`. Configure `RSS_FEED_USER_AGENTS` to rotate through one or more values (separate with `||`) during ingestion retries.
+Edit `feeds/rss.md` and `feeds/youtube.md` to add/remove sources.
 
-```bash
-RSS_FEED_USER_AGENTS="Mozilla/5.0 (...)||Feedly/1.0 (+http://www.feedly.com/fetcher.html)"
+## Files
+
 ```
-
-## YouTube TranscriptAPI ingestion logging
-
-Set `RESEARCH_LOG_LEVEL` to control runtime log verbosity across pipeline stages. The ingestion workflow sets this to `INFO` and now logs TranscriptAPI channel/video request attempts, response summaries, retries, and per-channel completion metrics to make silent YouTube failures diagnosable from `logs/ingestion.log`.
-
-```bash
-RESEARCH_LOG_LEVEL=INFO
+main.py              # entire pipeline (single file)
+sql/schema.sql       # 3 tables + hybrid RRF search function
+feeds/rss.md         # RSS feed list
+feeds/youtube.md     # YouTube channel list
+reports/             # generated reports (gitignored)
 ```
-
-## Key environment variables
-
-In addition to existing Anthropic/OpenAI/database credentials, the lead-agent planner now supports an optional override model:
-
-- `ANTHROPIC_LEAD_MODEL_ID` (optional, defaults to `claude-opus-4-6`)
-
-If unset, the pipeline still uses the standard defaults from `src/settings.md`.
-
-## Testing
-
-```bash
-pytest -q
-```
-
-## Additional docs
-
-- [`docs/runbook.md`](docs/runbook.md)
-- [`docs/research.md`](docs/research.md)
-- [`docs/costs.md`](docs/costs.md)
-- [`docs/plan.md`](docs/plan.md)
-- [`docs/implement.md`](docs/implement.md)
