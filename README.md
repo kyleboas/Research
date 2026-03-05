@@ -1,14 +1,19 @@
 # Football Research Pipeline
 
-Automatic deep research system that ingests football content, detects novel tactical trends, and generates sourced reports.
+Automatic deep research system that ingests football content, detects novel tactical trends, and generates production-grade sourced reports using multi-agent orchestration.
 
 ## How it works
 
 1. **Ingest** — Fetches RSS feeds and YouTube transcripts every 2 hours, stores full content in Supabase Postgres with vector embeddings.
 2. **Detect** — Uses Claude to identify novel tactics being tried by players/teams before they become mainstream.
-3. **Report** — Generates a deep research report sourced by ingested content, saved to `reports/`.
+3. **Report** — Multi-agent deep research pipeline:
+   - **Lead agent** (Opus) decomposes trend into non-overlapping research angles
+   - **Parallel subagents** (Sonnet) run iterative retrieval loops per angle (broaden → evaluate sufficiency → narrow)
+   - **Synthesis** merges all subagent outputs into a cohesive draft with citations
+   - **Critique** evaluates grounding against source evidence, flags hallucinations
+   - **Revision** produces the final report incorporating critique feedback
 
-All API calls route through **Cloudflare AI Gateway** for observability and rate limiting.
+All API calls route through **Cloudflare AI Gateway**.
 
 ## Setup
 
@@ -30,8 +35,8 @@ Edit `feeds/rss.md` and `feeds/youtube.md` to add/remove sources.
 ## Files
 
 ```
-main.py              # entire pipeline (~200 lines)
-sql/schema.sql       # 3 tables: sources, chunks, reports
+main.py              # entire pipeline (single file)
+sql/schema.sql       # 3 tables + hybrid search function
 feeds/rss.md         # RSS feed list
 feeds/youtube.md     # YouTube channel list
 reports/             # generated reports (gitignored)
