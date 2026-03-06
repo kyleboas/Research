@@ -176,12 +176,13 @@ def embed(texts):
         try:
             resp = client.embeddings.create(model=EMBED_MODEL, input=texts)
             return [d.embedding for d in resp.data]
-        except openai.InternalServerError as e:
+        except (openai.InternalServerError, openai.APIConnectionError, openai.APITimeoutError, openai.RateLimitError) as e:
             if attempt == max_attempts:
-                raise
+                log.error("Embeddings request failed after %s attempts: %s", max_attempts, e)
+                return None
             delay = min(8.0, 0.5 * (2 ** (attempt - 1))) + random.uniform(0, 0.2)
             log.warning(
-                "Embeddings request failed with internal server error (attempt %s/%s). Retrying in %.2fs: %s",
+                "Embeddings request failed (attempt %s/%s). Retrying in %.2fs: %s",
                 attempt,
                 max_attempts,
                 delay,
@@ -207,6 +208,9 @@ def chunk_and_embed(conn, source_id, text):
         return
 
     vectors = embed(chunks)
+    if not vectors:
+        log.warning("Skipping chunk insert for source_id=%s because embeddings were unavailable", source_id)
+        return
 
     with conn.cursor() as cur:
         for idx, (chunk, vec) in enumerate(zip(chunks, vectors)):
@@ -222,7 +226,11 @@ def chunk_and_embed(conn, source_id, text):
 # ══════════════════════════════════════════════
 
 def hybrid_search(conn, query, limit=20):
-    qvec = embed([query])[0]
+    qvecs = embed([query])
+    if not qvecs:
+        log.warning("Hybrid search skipped because query embedding could not be generated")
+        return []
+    qvec = qvecs[0]
     with conn.cursor() as cur:
         cur.execute(
             "SELECT h.chunk_id, h.source_id, h.content, s.title, s.url, h.score "
