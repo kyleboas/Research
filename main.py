@@ -786,6 +786,21 @@ def generate_report(conn, trend):
              out, len(all_chunks), len(all_subagent_results), research_round + 1)
     return final_report
 
+
+def _connect_db():
+    database_url = os.environ.get("DATABASE_URL", "").strip()
+    if not database_url:
+        log.error("DATABASE_URL is not set. Configure it in your environment before running the pipeline.")
+        raise SystemExit(2)
+
+    try:
+        return psycopg.connect(database_url)
+    except psycopg.OperationalError as e:
+        log.error("Failed to connect to Postgres using DATABASE_URL: %s", e)
+        log.error("If you are deploying on Railway, set DATABASE_URL to the Postgres reference variable (for example: ${{Postgres.DATABASE_URL}}).")
+        raise SystemExit(2) from e
+
+
 # ══════════════════════════════════════════════
 # Main
 # ══════════════════════════════════════════════
@@ -845,7 +860,7 @@ def main():
         chatgpt_auth.login()
         return
 
-    conn = psycopg.connect(os.environ["DATABASE_URL"])
+    conn = _connect_db()
     try:
         if args.step == "ingest":
             run_ingest(conn)
