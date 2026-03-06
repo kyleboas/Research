@@ -15,6 +15,7 @@ from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
 import anthropic, openai, psycopg
+import chatgpt_auth
 
 log = logging.getLogger("research")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -33,11 +34,27 @@ claude = anthropic.Anthropic(
     base_url=f"{GATEWAY}/anthropic",
     default_headers=_gw_headers,
 )
-oai = openai.OpenAI(
-    api_key=os.environ.get("OPENAI_API_KEY", "cloudflare"),
-    base_url=f"{GATEWAY}/openai",
-    default_headers=_gw_headers,
-)
+
+
+def _make_oai_client():
+    """Build an OpenAI client using the ChatGPT subscription OAuth token.
+
+    Falls back to the Cloudflare gateway + OPENAI_API_KEY if no OAuth
+    credentials are stored (e.g. during first-run before --login).
+    """
+    creds = chatgpt_auth.load_credentials()
+    if creds:
+        token = chatgpt_auth.get_access_token()
+        return openai.OpenAI(api_key=token)
+    # Fallback: gateway-proxied key
+    return openai.OpenAI(
+        api_key=os.environ.get("OPENAI_API_KEY", "cloudflare"),
+        base_url=f"{GATEWAY}/openai",
+        default_headers=_gw_headers,
+    )
+
+
+oai = _make_oai_client()
 
 CITATION_FMT = "Cite every claim as [S<source_id>:C<chunk_id>]. Never cite IDs not in the provided context."
 
@@ -772,7 +789,16 @@ def main():
         default="all",
         help="Pipeline step to run (default: all)",
     )
+    parser.add_argument(
+        "--login",
+        action="store_true",
+        help="Authenticate with ChatGPT subscription via OAuth (PKCE) and store credentials",
+    )
     args = parser.parse_args()
+
+    if args.login:
+        chatgpt_auth.login()
+        return
 
     conn = psycopg.connect(os.environ["DATABASE_URL"])
     try:
