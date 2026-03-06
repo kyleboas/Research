@@ -348,11 +348,41 @@ def ask_thinking(system, user, budget_tokens=10000, max_tokens=16000):
     return "", resp.choices[0].message.content
 
 def parse_json(text):
-    """Extract JSON from a text response."""
-    match = re.search(r"[\[{].*[\]}]", text, re.DOTALL)
-    if match:
-        return json.loads(match.group())
-    raise ValueError(f"No JSON found in response: {text[:200]}")
+    """Extract JSON from a text response.
+
+    Tries in order:
+    1. Direct parse of stripped text
+    2. Strip markdown code fences then parse
+    3. Regex extract of first {...} or [...] block
+
+    Logs the raw payload on failure so the exact bad output is visible.
+    """
+    stripped = text.strip()
+
+    # 1. Direct parse (handles well-formed responses)
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        pass
+
+    # 2. Strip code fences (```json ... ``` or ``` ... ```)
+    fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", stripped)
+    if fence_match:
+        try:
+            return json.loads(fence_match.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+
+    # 3. Regex-extract first JSON object or array
+    block_match = re.search(r"[\[{].*[\]}]", stripped, re.DOTALL)
+    if block_match:
+        try:
+            return json.loads(block_match.group())
+        except json.JSONDecodeError:
+            pass
+
+    log.error("parse_json failed — raw payload: %r", text[:500])
+    raise ValueError(f"No valid JSON found in response: {text[:200]}")
 
 # ══════════════════════════════════════════════
 # Pipeline state (persists trend between steps)
@@ -400,8 +430,10 @@ def detect_trends(conn) -> tuple[Optional[str], bool]:
             f"Already-covered topics (avoid repeating):\n{past_block}\n\n"
             "Identify the single most novel tactical or strategic trend being tried by football "
             "players or teams. Something new that hasn't been widely adopted yet.\n\n"
-            'Return JSON: {{"trend": "<10-20 word description>", "reasoning": "<why novel>"}}'
+            "Return ONLY valid JSON. No markdown. No code fences. No prose. Use double quotes.\n"
+            'Format: {"trend": "<10-20 word description>", "reasoning": "<why novel>"}'
         )
+        log.error("Trend detection raw response: %r", text)
         return parse_json(text).get("trend"), False
     except Exception as e:
         log.warning("Trend detection failed: %s", e)
@@ -878,7 +910,7 @@ def run_ingest(conn):
 def run_detect(conn):
     trend, had_error = detect_trends(conn)
     if had_error:
-        log.error("Trend detection run failed due to upstream/model error")
+        log.error("Trend detection run failed due to response-format/parsing error")
         raise SystemExit(1)
     if trend:
         log.info("Detected trend: %s", trend)
@@ -920,7 +952,7 @@ def main():
             run_ingest(conn)
             trend, had_error = detect_trends(conn)
             if had_error:
-                log.error("Trend detection run failed due to upstream/model error")
+                log.error("Trend detection run failed due to response-format/parsing error")
                 raise SystemExit(1)
             if trend:
                 log.info("Detected trend: %s", trend)
