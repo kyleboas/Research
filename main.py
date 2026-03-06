@@ -407,7 +407,7 @@ def load_state(conn, key):
 # Trend detection
 # ══════════════════════════════════════════════
 
-def detect_trends(conn) -> tuple[Optional[str], bool]:
+def detect_trends(conn) -> tuple[list[dict], bool]:
     with conn.cursor() as cur:
         cur.execute(
             "SELECT title, LEFT(content, 500) FROM sources "
@@ -415,7 +415,7 @@ def detect_trends(conn) -> tuple[Optional[str], bool]:
         )
         recent = cur.fetchall()
     if not recent:
-        return None, False
+        return [], False
 
     summaries = "\n".join(f"- {t}: {c}..." for t, c in recent)
     with conn.cursor() as cur:
@@ -428,16 +428,25 @@ def detect_trends(conn) -> tuple[Optional[str], bool]:
             "You are a football tactics analyst spotting novel trends before they go mainstream.",
             f"Recent articles and transcripts:\n{summaries}\n\n"
             f"Already-covered topics (avoid repeating):\n{past_block}\n\n"
-            "Identify the single most novel tactical or strategic trend being tried by football "
-            "players or teams. Something new that hasn't been widely adopted yet.\n\n"
+            "Identify the top 5 most novel tactical or strategic trends being tried by football "
+            "players or teams. Rank them by novelty — things not yet widely adopted get higher scores.\n\n"
+            "Score each trend 0-100 where 100 = extremely novel and underreported, 0 = widely known.\n\n"
             "Return ONLY valid JSON. No markdown. No code fences. No prose. Use double quotes.\n"
-            'Format: {"trend": "<10-20 word description>", "reasoning": "<why novel>"}'
+            'Format: {"candidates": ['
+            '{"trend": "<10-20 word description>", "reasoning": "<why novel>", "score": <0-100>}'
+            ', ...]}'
         )
-        log.error("Trend detection raw response: %r", text)
-        return parse_json(text).get("trend"), False
+        log.info("Trend detection raw response: %r", text)
+        candidates = parse_json(text).get("candidates", [])
+        # Validate each entry has required fields
+        valid = [
+            c for c in candidates
+            if isinstance(c, dict) and c.get("trend") and isinstance(c.get("score"), int)
+        ]
+        return valid, False
     except Exception as e:
         log.warning("Trend detection failed: %s", e)
-        return None, True
+        return [], True
 
 # ══════════════════════════════════════════════
 # Step 1: LeadResearcher — decompose with extended thinking + effort scaling
@@ -908,25 +917,42 @@ def run_ingest(conn):
 
 
 def run_detect(conn):
-    trend, had_error = detect_trends(conn)
+    candidates, had_error = detect_trends(conn)
     if had_error:
         log.error("Trend detection run failed due to response-format/parsing error")
         raise SystemExit(1)
-    if trend:
-        log.info("Detected trend: %s", trend)
-        save_state(conn, "pending_trend", trend)
+    if candidates:
+        with conn.cursor() as cur:
+            for c in candidates:
+                cur.execute(
+                    "INSERT INTO trend_candidates (trend, reasoning, score) VALUES (%s, %s, %s)",
+                    (c["trend"], c.get("reasoning"), c["score"]),
+                )
+        conn.commit()
+        log.info("Stored %d trend candidates (top score: %d)", len(candidates), candidates[0]["score"])
     else:
-        log.info("No novel trend detected this run")
+        log.info("No novel trends detected this run")
 
 
 def run_report(conn):
-    trend = load_state(conn, "pending_trend")
-    if not trend:
-        log.info("No pending trend found — skipping report")
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, trend FROM trend_candidates WHERE status = 'pending' ORDER BY score DESC LIMIT 1"
+        )
+        row = cur.fetchone()
+    if not row:
+        log.info("No pending trend candidates — skipping report")
         return
+    candidate_id, trend = row
     log.info("Generating report for trend: %s", trend)
     generate_report(conn, trend)
-    save_state(conn, "pending_trend", "")
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE trend_candidates SET status = CASE WHEN id = %s THEN 'reported' ELSE 'skipped' END "
+            "WHERE status = 'pending'",
+            (candidate_id,),
+        )
+    conn.commit()
 
 
 def main():

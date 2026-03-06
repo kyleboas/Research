@@ -38,7 +38,17 @@ CREATE TABLE IF NOT EXISTS pipeline_state (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS trend_candidates (
+    id          BIGSERIAL PRIMARY KEY,
+    trend       TEXT NOT NULL,
+    reasoning   TEXT,
+    score       INT NOT NULL CHECK (score BETWEEN 0 AND 100),
+    status      TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'reported', 'skipped')),
+    detected_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- Indexes for hybrid search
+CREATE INDEX IF NOT EXISTS idx_trend_candidates_status_score ON trend_candidates (status, score DESC);
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
 CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON chunks USING GIN (search_tsv);
 CREATE INDEX IF NOT EXISTS idx_sources_tsv ON sources USING GIN (search_tsv);
