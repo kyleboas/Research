@@ -152,12 +152,12 @@ def _post_token(payload):
         return json.loads(resp.read())
 
 
-def _exchange_code(code, verifier):
+def _exchange_code(code, verifier, redirect_uri=None):
     return _post_token({
         "grant_type": "authorization_code",
         "client_id": CLIENT_ID,
         "code": code,
-        "redirect_uri": REDIRECT_URI,
+        "redirect_uri": redirect_uri or REDIRECT_URI,
         "code_verifier": verifier,
     })
 
