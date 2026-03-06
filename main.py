@@ -46,6 +46,22 @@ def _has_oauth_credentials():
     return bool(chatgpt_auth.load_credentials())
 
 
+def _should_serve_login(step):
+    """Return True when this process should run the OAuth login web server.
+
+    Railway web services need to bind to PORT. If credentials are missing and this
+    process is asked to run LLM-dependent steps, we serve /login instead of exiting
+    so the user can authenticate first.
+    """
+    if os.environ.get("AUTO_SERVE_LOGIN", "1") == "0":
+        return False
+    if not os.environ.get("PORT"):
+        return False
+    if step not in {"all", "detect", "report"}:
+        return False
+    return not _has_oauth_credentials()
+
+
 def _make_oai_client():
     """Build an OpenAI client using the ChatGPT subscription OAuth token."""
     creds = chatgpt_auth.load_credentials()
@@ -872,6 +888,12 @@ def main():
 
     if args.login:
         chatgpt_auth.login()
+        return
+
+    if _should_serve_login(args.step):
+        log.warning("Missing ChatGPT OAuth credentials; starting login server at /login before running pipeline")
+        import server as auth_server
+        auth_server.main()
         return
 
     conn = _connect_db()
