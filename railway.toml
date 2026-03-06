@@ -31,3 +31,21 @@ builder = "nixpacks"
 
 startCommand = "python main.py --step ${PIPELINE_STEP:-all}"
 restartPolicyType = "never"
+
+# ── Auth server service ────────────────────────────────────────────────────────
+# Add a fifth service in the Railway dashboard pointing to this repo:
+#
+#   Service: auth
+#     Start command: python server.py
+#     (No cron — runs as a persistent web service)
+#
+#   Enable "Public Networking" so Railway assigns a domain.
+#   Railway will set RAILWAY_PUBLIC_DOMAIN automatically.
+#
+#   Visit https://<your-domain>/login once to authenticate with your
+#   ChatGPT subscription. Credentials are written to ~/.codex/auth.json
+#   and shared with the pipeline services via a Railway Volume mounted
+#   at the same path.
+#
+# Variables needed (same as other services):
+#   CLOUDFLARE_GATEWAY_URL, CLOUDFLARE_GATEWAY_TOKEN, DATABASE_URL, TRANSCRIPT_API_KEY
