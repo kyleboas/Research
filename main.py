@@ -6,7 +6,7 @@ Architecture mirrors Anthropic's production research system:
   → Synthesis → Sufficiency evaluation → optional re-plan → CitationAgent → Revision
 """
 
-import argparse, json, logging, os, re
+import argparse, json, logging, os, random, re, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -194,7 +194,23 @@ def store_source(conn, item, source_type):
 
 def embed(texts):
     client = get_oai_client()
-    return [d.embedding for d in client.embeddings.create(model=EMBED_MODEL, input=texts).data]
+    max_attempts = 5
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = client.embeddings.create(model=EMBED_MODEL, input=texts)
+            return [d.embedding for d in resp.data]
+        except openai.InternalServerError as e:
+            if attempt == max_attempts:
+                raise
+            delay = min(8.0, 0.5 * (2 ** (attempt - 1))) + random.uniform(0, 0.2)
+            log.warning(
+                "Embeddings request failed with internal server error (attempt %s/%s). Retrying in %.2fs: %s",
+                attempt,
+                max_attempts,
+                delay,
+                e,
+            )
+            time.sleep(delay)
 
 def vec_literal(vec):
     return "[" + ",".join(str(v) for v in vec) + "]"
