@@ -1,17 +1,8 @@
 {
-  "_comment": "LLM provider: 'anthropic' (Cloudflare gateway) or 'openai' (ChatGPT OAuth subscription).",
-
-  "llm_provider": "anthropic",
-
-  "anthropic": {
-    "lead_model": "claude-opus-4-6",
-    "model": "claude-sonnet-4-6"
-  },
-
+  "_comment": "OpenAI models used via ChatGPT OAuth subscription (no LLM API keys).",
   "openai": {
     "lead_model": "o3",
     "model": "gpt-4o"
   },
-
   "embed_model": "text-embedding-3-small"
 }

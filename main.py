@@ -14,7 +14,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
-import anthropic, openai, psycopg
+import openai, psycopg
 import chatgpt_auth
 from db_conn import resolve_database_conninfo
 
@@ -22,50 +22,25 @@ log = logging.getLogger("research")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
 ROOT = Path(__file__).resolve().parent
-GATEWAY = os.environ["CLOUDFLARE_GATEWAY_URL"].rstrip("/")
-GATEWAY_TOKEN = os.environ["CLOUDFLARE_GATEWAY_TOKEN"]
 TRANSCRIPT_KEY = os.environ["TRANSCRIPT_API_KEY"]
 
 # ── Config file (config.json) overrides env-var model defaults ────────────────
 _cfg_path = ROOT / "config.json"
 _CFG: dict = json.loads(_cfg_path.read_text()) if _cfg_path.exists() else {}
 
-LLM_PROVIDER = _CFG.get("llm_provider", "anthropic")  # "anthropic" | "openai"
-
-_ant = _CFG.get("anthropic", {})
-LEAD_MODEL = os.environ.get("CLAUDE_LEAD_MODEL") or _ant.get("lead_model", "claude-opus-4-6")
-MODEL      = os.environ.get("CLAUDE_MODEL")      or _ant.get("model",       "claude-sonnet-4-6")
-
 _oai_cfg = _CFG.get("openai", {})
-OAI_LEAD_MODEL = _oai_cfg.get("lead_model", "o3")
-OAI_MODEL      = _oai_cfg.get("model",      "gpt-4o")
+OAI_LEAD_MODEL = os.environ.get("OPENAI_LEAD_MODEL") or _oai_cfg.get("lead_model", "o3")
+OAI_MODEL      = os.environ.get("OPENAI_MODEL")      or _oai_cfg.get("model",      "gpt-4o")
 
 EMBED_MODEL = os.environ.get("EMBED_MODEL") or _CFG.get("embed_model", "text-embedding-3-small")
 
-_gw_headers = {"cf-aig-authorization": f"Bearer {GATEWAY_TOKEN}"}
-claude = anthropic.Anthropic(
-    api_key=os.environ.get("ANTHROPIC_API_KEY", "cloudflare"),
-    base_url=f"{GATEWAY}/anthropic",
-    default_headers=_gw_headers,
-)
-
-
 def _make_oai_client():
-    """Build an OpenAI client using the ChatGPT subscription OAuth token.
-
-    Falls back to the Cloudflare gateway + OPENAI_API_KEY if no OAuth
-    credentials are stored (e.g. during first-run before --login).
-    """
+    """Build an OpenAI client using the ChatGPT subscription OAuth token."""
     creds = chatgpt_auth.load_credentials()
-    if creds:
-        token = chatgpt_auth.get_access_token()
-        return openai.OpenAI(api_key=token)
-    # Fallback: gateway-proxied key
-    return openai.OpenAI(
-        api_key=os.environ.get("OPENAI_API_KEY", "cloudflare"),
-        base_url=f"{GATEWAY}/openai",
-        default_headers=_gw_headers,
-    )
+    if not creds:
+        raise RuntimeError("No ChatGPT OAuth credentials found. Run: python main.py --login")
+    token = chatgpt_auth.get_access_token()
+    return openai.OpenAI(api_key=token)
 
 
 oai = None
@@ -263,74 +238,42 @@ def chunks_to_context(rows):
     ], indent=2)
 
 # ══════════════════════════════════════════════
-# LLM helpers — dispatch to Anthropic or OpenAI based on config.json
+# LLM helpers
 # ══════════════════════════════════════════════
 
 def ask(system, user, model=None, max_tokens=4096):
-    """Standard LLM call — system + user → text.
-
-    Routes to Anthropic (Claude) or OpenAI (GPT) depending on llm_provider
-    set in config.json.
-    """
-    if LLM_PROVIDER == "openai":
-        client = get_oai_client()
-        resp = client.chat.completions.create(
-            model=model or OAI_MODEL,
-            max_completion_tokens=max_tokens,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user",   "content": user},
-            ],
-        )
-        return resp.choices[0].message.content
-
-    # anthropic (default)
-    resp = claude.messages.create(
-        model=model or MODEL,
-        max_tokens=max_tokens,
-        system=system,
-        messages=[{"role": "user", "content": user}],
+    """Standard LLM call — system + user → text."""
+    client = get_oai_client()
+    resp = client.chat.completions.create(
+        model=model or OAI_MODEL,
+        max_completion_tokens=max_tokens,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user",   "content": user},
+        ],
     )
-    return resp.content[0].text
+    return resp.choices[0].message.content
 
 
 def ask_thinking(system, user, budget_tokens=10000, max_tokens=16000):
     """Lead agent call with deep reasoning enabled.
 
-    Anthropic: extended thinking (claude-opus-4-6 scratchpad).
-    OpenAI: o3 / reasoning model with reasoning_effort=high.
+    Uses OpenAI reasoning models via ChatGPT OAuth subscription.
 
     Returns (thinking_text, response_text). thinking_text is empty for OpenAI
     as reasoning is internal to the model.
     """
-    if LLM_PROVIDER == "openai":
-        client = get_oai_client()
-        resp = client.chat.completions.create(
-            model=OAI_LEAD_MODEL,
-            max_completion_tokens=max_tokens,
-            reasoning_effort="high",
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user",   "content": user},
-            ],
-        )
-        return "", resp.choices[0].message.content
-
-    # anthropic (default)
-    resp = claude.messages.create(
-        model=LEAD_MODEL,
-        max_tokens=max_tokens,
-        thinking={"type": "enabled", "budget_tokens": budget_tokens},
-        messages=[{"role": "user", "content": f"<system>{system}</system>\n\n{user}"}],
+    client = get_oai_client()
+    resp = client.chat.completions.create(
+        model=OAI_LEAD_MODEL,
+        max_completion_tokens=max_tokens,
+        reasoning_effort="high",
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user",   "content": user},
+        ],
     )
-    thinking = ""
-    response = ""
-    for block in resp.content:
-        if block.type == "thinking":
-            thinking = block.thinking
-        elif block.type == "text":
-            response = block.text
-    return thinking, response
+    return "", resp.choices[0].message.content
 
 def parse_json(text):
     """Extract JSON from a text response."""

@@ -2,12 +2,12 @@
 
 Automatic deep research system that ingests football content, detects novel tactical trends, and generates production-grade sourced reports using multi-agent orchestration.
 
-Architecture mirrors [Anthropic's multi-agent research system](https://www.anthropic.com/engineering/multi-agent-research-system).
+Architecture mirrors [Anthropic's multi-agent research system](https://www.anthropic.com/engineering/multi-agent-research-system), implemented here with OpenAI models authenticated via ChatGPT OAuth.
 
 ## How it works
 
 1. **Ingest** — Fetches RSS feeds and YouTube transcripts every 2 hours, stores full content in Supabase Postgres with vector embeddings.
-2. **Detect** — Uses Claude to identify novel tactics being tried by players/teams before they become mainstream.
+2. **Detect** — Uses OpenAI models (via ChatGPT OAuth) to identify novel tactics being tried by players/teams before they become mainstream.
 3. **Report** — Multi-agent deep research pipeline:
 
 ```
@@ -57,14 +57,15 @@ Architecture mirrors [Anthropic's multi-agent research system](https://www.anthr
 └─────────────────────────────────────────────────────┘
 ```
 
-All API calls route through **Cloudflare AI Gateway**.
+LLM calls use your **ChatGPT subscription OAuth login** (no LLM API keys required).
 
 ## Setup
 
 1. Run `sql/schema.sql` in your Supabase SQL editor (enable pgvector first).
-2. Copy `env.example` to `.env` and fill in your keys.
+2. Copy `env.example` to `.env` and set database/transcript variables.
 3. `pip install -r requirements.txt`
-4. `python main.py`
+4. Authenticate once: `python main.py --login`
+5. `python main.py`
 
 ## Cron (every 2 hours)
 
