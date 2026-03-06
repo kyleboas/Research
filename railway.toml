@@ -19,12 +19,8 @@ builder = "nixpacks"
 #
 # Set these variables in Railway's Variables tab for all three services:
 #
-#   CLOUDFLARE_GATEWAY_URL   https://gateway.ai.cloudflare.com/v1/ACCOUNT/GATEWAY
-#   CLOUDFLARE_GATEWAY_TOKEN your-gateway-token
-#   DATABASE_URL             ${{pgvector.DATABASE_URL}}   ← Railway reference variable
-#   TRANSCRIPT_API_KEY       your-transcript-api-key
-#
-# Anthropic and OpenAI keys are stored as credentials in the Cloudflare dashboard.
+#   DATABASE_URL       ${{pgvector.DATABASE_URL}}   ← Railway reference variable
+#   TRANSCRIPT_API_KEY your-transcript-api-key
 #
 # After first deploy, run sql/schema.sql via Railway's Postgres query console
 # (or psql) to create the tables.
@@ -51,4 +47,4 @@ restartPolicyType = "never"
 #   auth_tokens table alongside the existing tables).
 #
 # Variables needed (same as other services):
-#   CLOUDFLARE_GATEWAY_URL, CLOUDFLARE_GATEWAY_TOKEN, DATABASE_URL, TRANSCRIPT_API_KEY
+#   DATABASE_URL, TRANSCRIPT_API_KEY
