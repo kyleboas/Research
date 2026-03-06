@@ -10,7 +10,7 @@ import argparse, json, logging, os, re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
@@ -791,6 +791,18 @@ def _connect_db():
     database_url = os.environ.get("DATABASE_URL", "").strip()
     if not database_url:
         log.error("DATABASE_URL is not set. Configure it in your environment before running the pipeline.")
+        raise SystemExit(2)
+
+    # Guard against unresolved template values or URLs that omit host,
+    # which makes psycopg fall back to a local unix socket.
+    parsed = urlparse(database_url)
+    if "${{" in database_url or "}}" in database_url:
+        log.error("DATABASE_URL appears to be an unresolved template: %s", database_url)
+        log.error("On Railway, set DATABASE_URL to the Postgres reference variable (for example: ${{Postgres.DATABASE_URL}}).")
+        raise SystemExit(2)
+    if not parsed.hostname:
+        log.error("DATABASE_URL must include a hostname. Current value resolves to local unix socket mode.")
+        log.error("Set DATABASE_URL to your managed Postgres URL (on Railway: ${{Postgres.DATABASE_URL}}).")
         raise SystemExit(2)
 
     try:
