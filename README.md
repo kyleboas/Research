@@ -66,14 +66,21 @@ LLM calls are routed through Cloudflare AI Gateway, and the runtime normalizes g
 1. Run `sql/schema.sql` in your Supabase SQL editor (enable pgvector first).
 2. Copy `env.example` to `.env` and set database/transcript variables.
 3. `pip install -r requirements.txt`
-4. Authenticate once: `python main.py --login`
-5. `python main.py`
+4. Run ingest manually once: `python main.py --step ingest`
+5. Detect candidates: `python main.py --step detect`
+6. Generate a report from top pending candidate: `python main.py --step report`
 
-## Cron (every 2 hours)
+## Cron (recommended split schedules)
 
 ```bash
-0 */2 * * * cd /path/to/research && /path/to/python main.py >> logs/run.log 2>&1
+0 * * * * cd /path/to/research && /path/to/python main.py --step ingest >> logs/ingest.log 2>&1
+0 */6 * * * cd /path/to/research && /path/to/python main.py --step detect --min-new-sources-for-detect 5 >> logs/detect.log 2>&1
+0 6 * * * cd /path/to/research && /path/to/python main.py --step report >> logs/report.log 2>&1
 ```
+
+`python main.py` defaults to `--step ingest`.
+
+`--step all` now runs ingest + detect only. To explicitly allow same-process reporting, pass `--allow-report-after-detect`.
 
 ## Feeds
 

@@ -913,10 +913,27 @@ def run_ingest(conn):
             if sid:
                 chunk_and_embed(conn, sid, item["content"])
                 new += 1
+    save_state(conn, "last_ingest_new_sources", str(new))
+    save_state(conn, "last_ingest_completed_at", datetime.utcnow().isoformat())
     log.info("Ingested %d new sources", new)
+    return new
 
 
-def run_detect(conn):
+def run_detect(conn, min_new_sources=0):
+    if min_new_sources > 0:
+        latest_new = load_state(conn, "last_ingest_new_sources")
+        try:
+            latest_new_count = int(latest_new) if latest_new is not None else 0
+        except ValueError:
+            latest_new_count = 0
+        if latest_new_count < min_new_sources:
+            log.info(
+                "Skipping detect: only %d new sources in latest ingest (min required: %d)",
+                latest_new_count,
+                min_new_sources,
+            )
+            return
+
     candidates, had_error = detect_trends(conn)
     if had_error:
         log.error("Trend detection run failed due to response-format/parsing error")
@@ -963,6 +980,17 @@ def main():
         default="ingest",
         help="Pipeline step to run (default: ingest)",
     )
+    parser.add_argument(
+        "--min-new-sources-for-detect",
+        type=int,
+        default=0,
+        help="Skip detect when latest ingest inserted fewer than this many new sources (default: 0)",
+    )
+    parser.add_argument(
+        "--allow-report-after-detect",
+        action="store_true",
+        help="When using --step all, also run report in the same process (disabled by default)",
+    )
     args = parser.parse_args()
 
     conn = _connect_db()
@@ -971,13 +999,19 @@ def main():
         if args.step == "ingest":
             run_ingest(conn)
         elif args.step == "detect":
-            run_detect(conn)
+            run_detect(conn, min_new_sources=args.min_new_sources_for_detect)
         elif args.step == "report":
             run_report(conn)
         else:
             run_ingest(conn)
-            run_detect(conn)
-            run_report(conn)
+            run_detect(conn, min_new_sources=args.min_new_sources_for_detect)
+            if args.allow_report_after_detect:
+                run_report(conn)
+            else:
+                log.info(
+                    "Step 'all' now runs ingest+detect only. "
+                    "Use --allow-report-after-detect to run report in the same process."
+                )
     finally:
         conn.close()
 

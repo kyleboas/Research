@@ -24,8 +24,14 @@ builder = "nixpacks"
 #   CLOUDFLARE_GATEWAY_URL    https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_name}/openai
 #   CLOUDFLARE_GATEWAY_TOKEN  your-openai-api-key
 #
+# Optional per-service extra CLI flags:
+#   PIPELINE_FLAGS            --min-new-sources-for-detect=5   (detect service example)
+#
+# Avoid --step all in production. If you intentionally need full same-process
+# execution, set PIPELINE_STEP=all and PIPELINE_FLAGS=--allow-report-after-detect.
+#
 # After first deploy, run sql/schema.sql via Railway's Postgres query console
 # (or psql) to create the tables.
 
-startCommand = "python main.py --step ${PIPELINE_STEP:-all}"
+startCommand = "python main.py --step ${PIPELINE_STEP:-ingest} ${PIPELINE_FLAGS}"
 restartPolicyType = "never"
