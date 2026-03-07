@@ -1,7 +1,11 @@
 import json
 import os
+import subprocess
+import sys
 from datetime import UTC, datetime
 from http.server import HTTPServer, SimpleHTTPRequestHandler
+from pathlib import Path
+from threading import Lock
 from urllib.parse import urlparse
 
 import psycopg
@@ -9,6 +13,74 @@ import psycopg
 from db_conn import resolve_database_conninfo
 
 PORT = int(os.environ.get("PORT", 8080))
+ROOT = Path(__file__).resolve().parent
+
+_run_lock = Lock()
+_step_runs = {
+    "ingest": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
+    "detect": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
+    "report": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
+}
+_active_processes = {}
+
+
+def _utc_now_iso():
+    return datetime.now(UTC).isoformat()
+
+
+def _refresh_step_runs():
+    with _run_lock:
+        for step, proc in list(_active_processes.items()):
+            if proc.poll() is None:
+                continue
+            _active_processes.pop(step, None)
+            state = _step_runs[step]
+            state["status"] = "success" if proc.returncode == 0 else "failed"
+            state["finished_at"] = _utc_now_iso()
+            state["exit_code"] = proc.returncode
+            output = ""
+            try:
+                if proc.stdout:
+                    output = proc.stdout.read() or ""
+            except Exception:
+                output = ""
+            output = output.strip()
+            if len(output) > 2000:
+                output = output[-2000:]
+            state["log_tail"] = output
+
+
+def _step_runs_snapshot():
+    with _run_lock:
+        return {k: dict(v) for k, v in _step_runs.items()}
+
+
+def _start_step_run(step):
+    _refresh_step_runs()
+    with _run_lock:
+        if step not in _step_runs:
+            return False, "invalid_step"
+        if any(proc.poll() is None for proc in _active_processes.values()):
+            return False, "another_step_running"
+
+        cmd = [sys.executable, str(ROOT / "main.py"), "--step", step]
+        proc = subprocess.Popen(
+            cmd,
+            cwd=ROOT,
+            env=os.environ.copy(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        _active_processes[step] = proc
+        _step_runs[step] = {
+            "status": "running",
+            "started_at": _utc_now_iso(),
+            "finished_at": None,
+            "exit_code": None,
+            "log_tail": "",
+        }
+        return True, None
 
 
 class DashboardHandler(SimpleHTTPRequestHandler):
@@ -90,6 +162,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         return json.loads(raw.decode("utf-8") or "{}")
 
     def _fetch_dashboard_payload(self):
+        _refresh_step_runs()
         conninfo, reason = resolve_database_conninfo()
         if not conninfo:
             warning = f"database_unavailable:{reason}"
@@ -100,6 +173,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 "reports": [],
                 "patterns": [],
                 "status": [],
+                "step_runs": _step_runs_snapshot(),
                 "warning": warning,
             }
 
@@ -379,6 +453,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             "reports": report_items,
             "patterns": pattern_items,
             "status": status_items,
+            "step_runs": _step_runs_snapshot(),
             "debug": {
                 "extraction_breakdown": extraction_breakdown,
                 "source_type_breakdown": source_type_breakdown,
@@ -395,6 +470,17 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             },
             "warning": None,
         }
+
+    def _trigger_pipeline_step(self):
+        payload = self._read_json_body()
+        step = str(payload.get("step") or "").strip().lower()
+        ok, err = _start_step_run(step)
+        if not ok:
+            status_code = 400 if err == "invalid_step" else 409
+            self._send_json({"ok": False, "error": err, "step_runs": _step_runs_snapshot()}, status=status_code)
+            return
+
+        self._send_json({"ok": True, "step": step, "step_runs": _step_runs_snapshot()}, status=202)
 
     def _record_trend_feedback(self):
         payload = self._read_json_body()
@@ -466,6 +552,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._record_trend_feedback()
             except Exception as exc:
                 self._send_json({"ok": False, "error": f"failed_to_record_feedback:{exc}"}, status=500)
+            return
+
+        if parsed.path == "/api/run-step":
+            try:
+                self._trigger_pipeline_step()
+            except Exception as exc:
+                self._send_json({"ok": False, "error": f"failed_to_trigger_step:{exc}"}, status=500)
             return
 
         self._send_json({"ok": False, "error": "not_found"}, status=404)
