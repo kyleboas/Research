@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from datetime import UTC, datetime
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
@@ -24,30 +25,51 @@ _step_runs = {
 _active_processes = {}
 
 
+def _read_log_tail(log_path, max_chars=2000):
+    if not log_path:
+        return ""
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            if size <= 0:
+                return ""
+            f.seek(max(0, size - 8192), os.SEEK_SET)
+            tail = f.read() or ""
+    except Exception:
+        return ""
+
+    tail = tail.strip()
+    if len(tail) > max_chars:
+        tail = tail[-max_chars:]
+    return tail
+
+
 def _utc_now_iso():
     return datetime.now(UTC).isoformat()
 
 
 def _refresh_step_runs():
     with _run_lock:
-        for step, proc in list(_active_processes.items()):
+        for step, run_meta in list(_active_processes.items()):
+            proc = run_meta["proc"]
+            log_path = run_meta.get("log_path")
             if proc.poll() is None:
+                _step_runs[step]["log_tail"] = _read_log_tail(log_path)
                 continue
             _active_processes.pop(step, None)
             state = _step_runs[step]
             state["status"] = "success" if proc.returncode == 0 else "failed"
             state["finished_at"] = _utc_now_iso()
             state["exit_code"] = proc.returncode
-            output = ""
+
+            log_file = run_meta.get("log_file")
             try:
-                if proc.stdout:
-                    output = proc.stdout.read() or ""
+                if log_file:
+                    log_file.close()
             except Exception:
-                output = ""
-            output = output.strip()
-            if len(output) > 2000:
-                output = output[-2000:]
-            state["log_tail"] = output
+                pass
+            state["log_tail"] = _read_log_tail(log_path)
 
 
 def _step_runs_snapshot():
@@ -60,19 +82,20 @@ def _start_step_run(step):
     with _run_lock:
         if step not in _step_runs:
             return False, "invalid_step"
-        if any(proc.poll() is None for proc in _active_processes.values()):
+        if any(meta["proc"].poll() is None for meta in _active_processes.values()):
             return False, "another_step_running"
 
+        log_file = tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", delete=False)
         cmd = [sys.executable, str(ROOT / "main.py"), "--step", step]
         proc = subprocess.Popen(
             cmd,
             cwd=ROOT,
             env=os.environ.copy(),
-            stdout=subprocess.PIPE,
+            stdout=log_file,
             stderr=subprocess.STDOUT,
             text=True,
         )
-        _active_processes[step] = proc
+        _active_processes[step] = {"proc": proc, "log_file": log_file, "log_path": log_file.name}
         _step_runs[step] = {
             "status": "running",
             "started_at": _utc_now_iso(),
