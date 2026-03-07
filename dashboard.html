@@ -195,22 +195,6 @@
         { event: "Cron started", detail: "Pipeline run #2487 kicked off.", time: "19:15" },
       ];
 
-      const ingestItems = [
-        {
-          title: "He loves the club – Liverpool boss Arne Slot hails evergreen Andy Robertson",
-          publication: "The Independent",
-          description:
-            "Robertson impressed in the FA Cup win over Wolves and continues to set the standard for intensity and leadership as Liverpool rotate heavily ahead of a congested schedule.",
-          url: "https://www.independent.co.uk/",
-        },
-        {
-          title: "He was meant to take De Bruyne’s crown. Instead, Foden’s City career is flatlining",
-          publication: "The Guardian",
-          description:
-            "Playmaker has become peripheral as Manchester City chase another title run, with tactical shifts and role ambiguity limiting his direct impact in big fixtures this month.",
-          url: "https://www.theguardian.com/",
-        },
-      ];
 
       const trends = [
         {
@@ -259,12 +243,44 @@
         });
 
       const ingestEl = document.getElementById("ingest");
-      ingestItems.forEach((item) => {
-        ingestEl.insertAdjacentHTML(
-          "beforeend",
-          `<a class="list-item" href="${item.url}" target="_blank" rel="noreferrer"><div><h2 class="item-title">${item.title}</h2><p class="item-sub">${truncate(item.description)}</p><p class="item-meta">${item.publication}</p></div><span class="item-time">↗</span></a>`
-        );
-      });
+
+      const renderIngestItems = (items) => {
+        ingestEl.innerHTML = "";
+
+        if (!items.length) {
+          ingestEl.insertAdjacentHTML(
+            "beforeend",
+            `<article class="list-item"><div><h2 class="item-title">No ingested items yet</h2><p class="item-sub">Run ingest to populate this tab.</p></div><span class="item-time">—</span></article>`
+          );
+          return;
+        }
+
+        items.forEach((item) => {
+          const linkTarget = item.url || "#";
+          const arrow = item.url ? "↗" : "•";
+          ingestEl.insertAdjacentHTML(
+            "beforeend",
+            `<a class="list-item" href="${linkTarget}" ${item.url ? `target="_blank" rel="noreferrer"` : ""}><div><h2 class="item-title">${item.title}</h2><p class="item-sub">${truncate(item.description || "")}</p><p class="item-meta">${item.source_type || "Unknown source"}</p></div><span class="item-time">${arrow}</span></a>`
+          );
+        });
+      };
+
+      const loadIngestItems = async () => {
+        try {
+          const response = await fetch("/api/ingest");
+          const payload = await response.json();
+
+          if (!response.ok) {
+            throw new Error(payload.warning || "Failed to fetch ingest items");
+          }
+
+          renderIngestItems(payload.items || []);
+        } catch (error) {
+          ingestEl.innerHTML = `<article class="list-item"><div><h2 class="item-title">Unable to load ingested items</h2><p class="item-sub">${error.message}</p></div><span class="item-time">!</span></article>`;
+        }
+      };
+
+      loadIngestItems();
 
       const detectEl = document.getElementById("detect");
       trends.forEach((trend, index) => {
