@@ -10,8 +10,6 @@
   "citation_model": "google/gemini-2.5-flash",
   "eval_model": "google/gemini-2.5-flash",
 
-  "batch_mode": false,
-
   "bertrend": {
     "window_days": 1,
     "lookback_days": 14,

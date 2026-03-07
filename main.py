@@ -48,8 +48,6 @@ REVISION_MODEL  = os.environ.get("REVISION_MODEL")  or _CFG.get("revision_model"
 CITATION_MODEL  = os.environ.get("CITATION_MODEL")  or _CFG.get("citation_model",  "google/gemini-2.5-flash")
 EVAL_MODEL      = os.environ.get("EVAL_MODEL")      or _CFG.get("eval_model",      "google/gemini-2.5-flash")
 
-BATCH_MODE = _CFG.get("batch_mode", False)
-
 
 def _normalize_cloudflare_base_urls(raw_url: str):
     """Return SDK-safe chat/embeddings base URLs from a Cloudflare Gateway URL.
@@ -97,8 +95,8 @@ _chat_base_url, _embed_base_url = _normalize_cloudflare_base_urls(CLOUDFLARE_GAT
 log.info("Cloudflare chat base URL: %s", _chat_base_url)
 if _embed_base_url != _chat_base_url:
     log.info("Cloudflare embeddings base URL: %s", _embed_base_url)
-log.info("Model config: lead=%s eval=%s summary=%s synthesis=%s citation=%s revision=%s batch=%s",
-         LEAD_MODEL, EVAL_MODEL, SUMMARY_MODEL, SYNTHESIS_MODEL, CITATION_MODEL, REVISION_MODEL, BATCH_MODE)
+log.info("Model config: lead=%s eval=%s summary=%s synthesis=%s citation=%s revision=%s",
+         LEAD_MODEL, EVAL_MODEL, SUMMARY_MODEL, SYNTHESIS_MODEL, CITATION_MODEL, REVISION_MODEL)
 
 
 def get_chat_client():
@@ -473,156 +471,6 @@ def ask_thinking(system, user, budget_tokens=10000, max_tokens=16000):
     return "", resp.choices[0].message.content
 
 
-# ── Batch API helpers (50% cost reduction, optional) ─────────────────────────
-# When batch_mode is true in config.json and ANTHROPIC_API_KEY is set,
-# subagent summaries are submitted via Anthropic's Message Batches API
-# (api.anthropic.com) at 50% of standard rates. Results arrive within 24h.
-# Falls back to normal gateway calls when batch API is unavailable.
-#
-# ANTHROPIC_API_KEY is ONLY needed for batch mode. All other calls route
-# through the Cloudflare AI Gateway using CLOUDFLARE_GATEWAY_TOKEN.
-
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-_ANTHROPIC_BATCH_URL = "https://api.anthropic.com/v1/messages/batches"
-_ANTHROPIC_MSG_URL = "https://api.anthropic.com/v1/messages"
-
-
-def _is_anthropic_model(model):
-    """Check if a model routes to Anthropic (for batch API eligibility)."""
-    return model and ("anthropic/" in model or "claude" in model.lower())
-
-
-def _anthropic_model_id(model):
-    """Strip provider prefix for direct Anthropic API calls."""
-    return model.replace("anthropic/", "")
-
-
-def _anthropic_direct(system, user, model, max_tokens=4096):
-    """Call Anthropic Messages API directly (bypassing gateway).
-
-    Used for batch-eligible requests when ANTHROPIC_API_KEY is available.
-    Returns the text response.
-    """
-    payload = json.dumps({
-        "model": _anthropic_model_id(model),
-        "max_tokens": max_tokens,
-        "system": system,
-        "messages": [{"role": "user", "content": user}],
-    }).encode()
-
-    req = Request(_ANTHROPIC_MSG_URL, data=payload, method="POST")
-    req.add_header("x-api-key", ANTHROPIC_API_KEY)
-    req.add_header("anthropic-version", "2023-06-01")
-    req.add_header("content-type", "application/json")
-
-    with urlopen(req, timeout=300) as r:
-        data = json.loads(r.read())
-    return data["content"][0]["text"]
-
-
-def submit_batch(requests):
-    """Submit a batch of Anthropic message requests.
-
-    Args:
-        requests: List of dicts with keys: custom_id, system, user, model, max_tokens
-
-    Returns:
-        batch_id for polling, or None if batch API is unavailable.
-    """
-    if not ANTHROPIC_API_KEY:
-        return None
-
-    batch_requests = []
-    for r in requests:
-        batch_requests.append({
-            "custom_id": r["custom_id"],
-            "params": {
-                "model": _anthropic_model_id(r["model"]),
-                "max_tokens": r.get("max_tokens", 4096),
-                "system": r["system"],
-                "messages": [{"role": "user", "content": r["user"]}],
-            },
-        })
-
-    payload = json.dumps({"requests": batch_requests}).encode()
-    req = Request(_ANTHROPIC_BATCH_URL, data=payload, method="POST")
-    req.add_header("x-api-key", ANTHROPIC_API_KEY)
-    req.add_header("anthropic-version", "2023-06-01")
-    req.add_header("content-type", "application/json")
-
-    with urlopen(req, timeout=60) as r:
-        data = json.loads(r.read())
-    batch_id = data["id"]
-    log.info("Batch submitted: %s (%d requests)", batch_id, len(requests))
-    return batch_id
-
-
-def poll_batch(batch_id, poll_interval=30, timeout=3600):
-    """Poll for batch completion and return results keyed by custom_id.
-
-    Returns:
-        Dict mapping custom_id -> response text
-    """
-    url = f"{_ANTHROPIC_BATCH_URL}/{batch_id}"
-    deadline = time.time() + timeout
-
-    while time.time() < deadline:
-        req = Request(url)
-        req.add_header("x-api-key", ANTHROPIC_API_KEY)
-        req.add_header("anthropic-version", "2023-06-01")
-
-        with urlopen(req, timeout=30) as r:
-            data = json.loads(r.read())
-
-        status = data.get("processing_status", "")
-        if status == "ended":
-            break
-        log.info("Batch %s: %s", batch_id, status)
-        time.sleep(poll_interval)
-    else:
-        log.warning("Batch %s timed out after %ds", batch_id, timeout)
-        return {}
-
-    # Fetch results
-    results_url = data.get("results_url", "")
-    if not results_url:
-        log.warning("Batch %s: no results_url in response", batch_id)
-        return {}
-
-    req = Request(results_url)
-    req.add_header("x-api-key", ANTHROPIC_API_KEY)
-    req.add_header("anthropic-version", "2023-06-01")
-
-    with urlopen(req, timeout=60) as r:
-        lines = r.read().decode().strip().split("\n")
-
-    results = {}
-    for line in lines:
-        if not line.strip():
-            continue
-        item = json.loads(line)
-        cid = item.get("custom_id", "")
-        if item.get("result", {}).get("type") == "succeeded":
-            msg = item["result"]["message"]
-            results[cid] = msg["content"][0]["text"]
-        else:
-            log.warning("Batch item %s failed: %s", cid, item.get("result", {}).get("error"))
-    return results
-
-
-def ask_or_batch(system, user, model=None, max_tokens=4096):
-    """Standard ask() routed through the Cloudflare AI Gateway.
-
-    Prompt caching works automatically — Anthropic caches identical system
-    prompt prefixes on their side regardless of whether the request arrives
-    via gateway or direct API. Static SYS_* constants ensure cache hits.
-
-    For batch submission (50% cost reduction, requires ANTHROPIC_API_KEY),
-    use submit_batch() + poll_batch() directly.
-    """
-    return ask(system, user, model=model, max_tokens=max_tokens)
-
-
 def parse_json(text):
     """Extract JSON from a text response.
 
@@ -878,7 +726,7 @@ def decompose_topic(trend):
 # Step 2: Subagent — OODA retrieval loop (broad-to-narrow)
 # ══════════════════════════════════════════════
 
-def research_angle(conn, trend, task, defer_summary=False):
+def research_angle(conn, trend, task):
     """Subagent with OODA loop: Observe → Orient → Decide → Act.
 
     Mirrors Anthropic's subagent pattern:
@@ -887,9 +735,6 @@ def research_angle(conn, trend, task, defer_summary=False):
     - Decide: generate a narrower, more targeted query
     - Act: retrieve again with refined query
     - Repeat until sufficient or max rounds reached
-
-    If defer_summary=True, skips the LLM summary call and returns chunks only
-    (for batch mode where summaries are submitted as a batch).
     """
     angle = task.get("angle", "general")
     objective = task.get("objective", "")
@@ -948,30 +793,8 @@ def research_angle(conn, trend, task, defer_summary=False):
 
     chunk_json = chunks_to_context(list(all_chunks.values()))
 
-    if defer_summary:
-        # Return without summarizing — caller will batch the summary calls
-        log.info("Subagent '%s' retrieval done (deferred summary): %d chunks, %d rounds",
-                 angle, len(all_chunks), round_num + 1)
-        return {"angle": angle, "summary": None, "chunks": list(all_chunks.values()),
-                "coverage": last_coverage,
-                "_summary_request": {
-                    "system": SYS_SUBAGENT,
-                    "user": (
-                        f"Angle: {angle}\n"
-                        f"Objective: {objective}\n"
-                        f"Out of scope: {boundaries}\n\n"
-                        f"Evidence chunks:\n{chunk_json}\n\n"
-                        "Write a thorough, evidence-grounded analysis for this angle:\n"
-                        "- Lead with the strongest finding\n"
-                        "- Use inline citations [S<source_id>:C<chunk_id>] on every claim\n"
-                        "- Bold key statistics and figures\n"
-                        "- Note evidence quality and any limitations\n"
-                        "- Flag if evidence was insufficient for any part of the objective"
-                    ),
-                }}
-
     # Write grounded summary for this angle
-    summary = ask_or_batch(
+    summary = ask(
         SYS_SUBAGENT,
 
         f"Angle: {angle}\n"
@@ -991,20 +814,10 @@ def research_angle(conn, trend, task, defer_summary=False):
             "coverage": last_coverage}
 
 def run_subagents(conn, trend, tasks):
-    """Run subagent research in parallel with bounded concurrency.
-
-    When BATCH_MODE is True and ANTHROPIC_API_KEY is set, subagent summaries
-    are submitted as a single Anthropic Message Batch (50% cost reduction).
-    Retrieval (OODA loop) still runs in parallel via the gateway.
-    """
-    use_batch = BATCH_MODE and ANTHROPIC_API_KEY and _is_anthropic_model(SUMMARY_MODEL)
-
+    """Run subagent research in parallel with bounded concurrency."""
     results = []
     with ThreadPoolExecutor(max_workers=min(len(tasks), 4)) as pool:
-        futures = {
-            pool.submit(research_angle, conn, trend, task, defer_summary=use_batch): task
-            for task in tasks
-        }
+        futures = {pool.submit(research_angle, conn, trend, task): task for task in tasks}
         for future in as_completed(futures):
             try:
                 results.append(future.result())
@@ -1013,51 +826,6 @@ def run_subagents(conn, trend, tasks):
                 log.warning("Subagent '%s' failed: %s", task.get("angle"), e)
                 results.append({"angle": task.get("angle", "?"),
                                 "summary": f"Research failed: {e}", "chunks": [], "coverage": 0})
-
-    if not use_batch:
-        return results
-
-    # Batch all deferred summaries via Anthropic Message Batches API
-    batch_requests = []
-    deferred_indices = []
-    for i, r in enumerate(results):
-        req = r.pop("_summary_request", None)
-        if req and r["summary"] is None:
-            batch_requests.append({
-                "custom_id": f"summary-{i}-{r['angle']}",
-                "system": req["system"],
-                "user": req["user"],
-                "model": SUMMARY_MODEL,
-                "max_tokens": 4096,
-            })
-            deferred_indices.append(i)
-
-    if not batch_requests:
-        return results
-
-    log.info("Submitting %d subagent summaries as Anthropic batch (50%% cost reduction)...",
-             len(batch_requests))
-    batch_id = submit_batch(batch_requests)
-
-    if batch_id:
-        batch_results = poll_batch(batch_id)
-        for req, idx in zip(batch_requests, deferred_indices):
-            cid = req["custom_id"]
-            if cid in batch_results:
-                results[idx]["summary"] = batch_results[cid]
-                log.info("Batch summary received for '%s'", results[idx]["angle"])
-            else:
-                log.warning("Batch summary missing for '%s', falling back to direct call",
-                            results[idx]["angle"])
-                results[idx]["summary"] = ask_or_batch(
-                    req["system"], req["user"], model=SUMMARY_MODEL)
-    else:
-        # Batch submission failed, fall back to direct calls
-        log.warning("Batch submission failed, falling back to direct calls")
-        for req, idx in zip(batch_requests, deferred_indices):
-            results[idx]["summary"] = ask_or_batch(
-                req["system"], req["user"], model=SUMMARY_MODEL)
-
     return results
 
 # ══════════════════════════════════════════════
@@ -1084,7 +852,7 @@ def synthesize(trend, subagent_results):
     weak = [r["angle"] for r in subagent_results if r.get("coverage", 100) < 40]
     failed = [r["angle"] for r in subagent_results if not r["chunks"]]
 
-    draft = ask_or_batch(
+    draft = ask(
         SYS_SYNTHESIS,
 
         f"Topic: {trend}\n\n"
@@ -1201,7 +969,7 @@ def verify_citations(trend, draft, chunk_json):
 
 def revise(trend, draft, citation_report, chunk_json):
     """Produce the final report incorporating citation verification feedback."""
-    return ask_or_batch(
+    return ask(
         SYS_REVISION,
 
         f"Topic: {trend}\n\n"
@@ -1300,7 +1068,6 @@ def generate_report(conn, trend):
             "revision": REVISION_MODEL,
             "signal": SIGNAL_MODEL,
         },
-        "batch_mode": BATCH_MODE,
     })
     with conn.cursor() as cur:
         cur.execute("INSERT INTO reports (title, content, metadata) VALUES (%s, %s, %s::jsonb)",
