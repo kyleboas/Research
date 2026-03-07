@@ -19,6 +19,9 @@ from urllib.request import Request, urlopen, build_opener, HTTPCookieProcessor
 import openai, psycopg
 from db_conn import resolve_database_conninfo
 from trend_detection import run_bertrend_detection, describe_signals_with_llm
+from article_extractor import extract_article, should_extract
+from tactical_extraction import chunk_with_context, extract_tactical_patterns, extract_tactical_context
+from novelty_scoring import compute_novelty_score, update_baseline, score_tactical_pattern_novelty
 
 log = logging.getLogger("research")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -212,7 +215,12 @@ def _newsblur_session():
     return opener
 
 def fetch_newsblur():
-    """Fetch recent stories from NewsBlur river of news."""
+    """Fetch recent stories from NewsBlur river of news.
+
+    Treats RSS as discovery: fetches the feed for URLs and metadata, then
+    uses full-text extraction to get the actual article body when the RSS
+    content looks truncated (< 500 words).
+    """
     try:
         opener = _newsblur_session()
     except Exception as e:
@@ -230,16 +238,44 @@ def fetch_newsblur():
     for story in data.get("stories", []):
         title = (story.get("story_title") or "").strip()
         url = (story.get("story_permalink") or "").strip()
-        content = strip_html(story.get("story_content") or story.get("story_summary") or "")
+        rss_content = strip_html(story.get("story_content") or story.get("story_summary") or "")
         story_id = str(story.get("id") or url).strip()
         feed_id = str(story.get("story_feed_id") or "").strip()
-        if not content:
+        if not rss_content:
             continue
+
+        # Full-text extraction: if RSS content is short, fetch the real article
+        content = rss_content
+        author = None
+        publish_date = None
+        sitename = None
+        extraction_method = "rss"
+
+        if should_extract(url, rss_content):
+            try:
+                article = extract_article(url, fallback_content=rss_content)
+                if len(article["content"]) > len(rss_content):
+                    content = article["content"]
+                    extraction_method = article["extraction_method"]
+                    log.info("Full-text extraction improved %s: %d→%d chars (%s)",
+                             title[:40], len(rss_content), len(content), extraction_method)
+                author = article.get("author")
+                publish_date = article.get("publish_date")
+                sitename = article.get("sitename")
+                if article.get("title") and not title:
+                    title = article["title"]
+            except Exception as e:
+                log.debug("Full-text extraction failed for %s: %s", url, e)
+
         items.append({
             "title": title,
             "url": url,
             "content": content,
             "key": f"nb:{feed_id}:{story_id}",
+            "author": author,
+            "publish_date": publish_date,
+            "sitename": sitename,
+            "extraction_method": extraction_method,
         })
     return items
 
@@ -344,9 +380,13 @@ def fetch_youtube(name, channel_id):
 def store_source(conn, item, source_type):
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO sources (source_type, source_key, title, url, content) "
-            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (source_key) DO NOTHING RETURNING id",
-            (source_type, item["key"], item["title"], item["url"], item["content"]),
+            "INSERT INTO sources (source_type, source_key, title, url, content, "
+            "author, publish_date, sitename, extraction_method) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (source_key) DO NOTHING RETURNING id",
+            (source_type, item["key"], item["title"], item["url"], item["content"],
+             item.get("author"), item.get("publish_date"), item.get("sitename"),
+             item.get("extraction_method", "rss")),
         )
         row = cur.fetchone()
         conn.commit()
@@ -380,32 +420,59 @@ def vec_literal(vec):
     return "[" + ",".join(str(v) for v in vec) + "]"
 
 def chunk_and_embed(conn, source_id, text):
-    words = text.split()
-    if not words:
-        return
-    chunks = []
-    for i in range(0, len(words), 160):
-        chunk = " ".join(words[i:i + 200])
-        if chunk.strip():
-            chunks.append(chunk.strip())
-        if i + 200 >= len(words):
-            break
-    if not chunks:
+    """Football-aware chunking, embedding, and tactical pattern extraction.
+
+    Uses sentence-boundary-aware chunking that preserves tactical context,
+    then extracts structured tactical patterns (actor → action → zone/phase)
+    from each chunk for the detection layer.
+    """
+    chunk_records = chunk_with_context(text)
+    if not chunk_records:
         return
 
-    vectors = embed(chunks)
+    chunk_texts = [c["content"] for c in chunk_records]
+    vectors = embed(chunk_texts)
     if not vectors:
         log.warning("Skipping chunk insert for source_id=%s because embeddings were unavailable", source_id)
         return
 
+    all_patterns = []
     with conn.cursor() as cur:
-        for idx, (chunk, vec) in enumerate(zip(chunks, vectors)):
+        for chunk_rec, vec in zip(chunk_records, vectors):
+            idx = chunk_rec["chunk_index"]
+            content = chunk_rec["content"]
+            ctx = chunk_rec.get("tactical_context", {})
+
+            # Store chunk metadata as JSONB in the metadata column if available
             cur.execute(
                 "INSERT INTO chunks (source_id, chunk_index, content, embedding) "
-                "VALUES (%s, %s, %s, %s::vector) ON CONFLICT (source_id, chunk_index) DO NOTHING",
-                (source_id, idx, chunk, vec_literal(vec)),
+                "VALUES (%s, %s, %s, %s::vector) ON CONFLICT (source_id, chunk_index) DO NOTHING "
+                "RETURNING id",
+                (source_id, idx, content, vec_literal(vec)),
             )
+            row = cur.fetchone()
+            chunk_id = row[0] if row else None
+
+            # Extract tactical patterns from chunks with sufficient tactical density
+            if chunk_id and ctx.get("tactical_density", 0) > 0.1:
+                patterns = extract_tactical_patterns(content, source_id=source_id, chunk_id=chunk_id)
+                all_patterns.extend(patterns)
+
+        # Store tactical patterns
+        for p in all_patterns:
+            cur.execute(
+                "INSERT INTO tactical_patterns "
+                "(source_id, chunk_id, pattern_type, actor, action, context, zones, phase) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                (p["source_id"], p["chunk_id"], p["pattern_type"],
+                 p.get("actor"), p["action"], p.get("context", "")[:300],
+                 p.get("zones") or [], p.get("phase")),
+            )
+
         conn.commit()
+
+    if all_patterns:
+        log.info("Extracted %d tactical patterns from source_id=%s", len(all_patterns), source_id)
 
 # ══════════════════════════════════════════════
 # Hybrid retrieval (semantic + keyword via RRF)
@@ -657,15 +724,124 @@ def _feedback_adjustment_for_trend(
     return max(-50, min(50, int(round(adjustment))))
 
 
-def detect_trends(conn) -> tuple[list[dict], bool]:
-    """Detect novel trends using BERTrend weak signal detection + LLM synthesis.
+def _detect_novel_tactical_patterns(conn, past_topics):
+    """Detect novel tactical patterns by comparing recent extractions against baselines.
 
-    Pipeline:
-      1. Run BERTrend clustering on chunk embeddings across time windows
-      2. Track topic evolution with merging and exponential decay
-      3. Classify signals as noise/weak/strong via rolling percentile thresholds
-      4. Feed algorithmic signals into LLM for human-readable trend descriptions
-      5. Fall back to LLM-only detection if BERTrend finds nothing
+    This is the second detector alongside BERTrend: instead of looking for growing
+    topic clusters, it looks for new structured tactical behaviors (role → action → zone)
+    that are semantically distant from what has been seen before.
+
+    Returns list of candidate dicts compatible with the pipeline.
+    """
+    # Fetch recent tactical patterns (last 7 days)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT tp.id, tp.actor, tp.action, tp.context, tp.zones, tp.phase, "
+            "tp.source_id, s.title AS source_title, s.url AS source_url "
+            "FROM tactical_patterns tp "
+            "JOIN sources s ON tp.source_id = s.id "
+            "WHERE tp.created_at > NOW() - INTERVAL '7 days' "
+            "ORDER BY tp.created_at DESC LIMIT 500"
+        )
+        recent_patterns = cur.fetchall()
+
+    if not recent_patterns:
+        return []
+
+    # Group patterns by action type to find recurring tactical behaviors
+    action_groups = {}
+    for row in recent_patterns:
+        pat_id, actor, action, context, zones, phase, src_id, src_title, src_url = row
+        key = f"{actor} {action}"
+        if key not in action_groups:
+            action_groups[key] = {
+                "actor": actor,
+                "action": action,
+                "contexts": [],
+                "source_ids": set(),
+                "source_titles": [],
+                "pattern_ids": [],
+                "zones": set(),
+                "phases": set(),
+            }
+        group = action_groups[key]
+        group["contexts"].append(context[:200] if context else "")
+        group["source_ids"].add(src_id)
+        if src_title and src_title not in group["source_titles"]:
+            group["source_titles"].append(src_title)
+        group["pattern_ids"].append(pat_id)
+        if zones:
+            group["zones"].update(zones)
+        if phase:
+            group["phases"].add(phase)
+
+    # Filter: only patterns with 2+ sources (corroborated, not noise)
+    corroborated = {k: v for k, v in action_groups.items() if len(v["source_ids"]) >= 2}
+    if not corroborated:
+        return []
+
+    # Score novelty for each corroborated pattern
+    descriptions = []
+    groups_list = []
+    for key, group in corroborated.items():
+        desc = f"{group['actor']} {group['action']}"
+        if group["zones"]:
+            desc += f" in {', '.join(list(group['zones'])[:2])}"
+        if group["phases"]:
+            desc += f" during {list(group['phases'])[0]}"
+        descriptions.append(desc)
+        groups_list.append((key, group))
+
+    vectors = embed(descriptions)
+    if not vectors:
+        return []
+
+    candidates = []
+    for (key, group), desc, vec in zip(groups_list, descriptions, vectors):
+        novelty = compute_novelty_score(conn, desc, vec, source_count=len(group["source_ids"]))
+
+        # Only promote patterns with meaningful novelty
+        if novelty < 0.3:
+            continue
+
+        # Build candidate compatible with existing pipeline
+        score = int(min(100, novelty * 100))
+        candidates.append({
+            "trend": desc,
+            "reasoning": (
+                f"Novel tactical pattern detected: {group['actor']} performing {group['action']} "
+                f"across {len(group['source_ids'])} sources. "
+                f"Zones: {', '.join(list(group['zones'])[:3]) if group['zones'] else 'unspecified'}. "
+                f"Novelty score: {novelty:.2f}."
+            ),
+            "score": score,
+            "source_titles": group["source_titles"][:5],
+            "sources": [
+                {"source_id": sid, "title": "", "url": ""}
+                for sid in list(group["source_ids"])[:5]
+            ],
+            "novelty_score": novelty,
+            "source_diversity": len(group["source_ids"]),
+            "pattern_ids": group["pattern_ids"],
+            "detection_method": "tactical_pattern",
+        })
+
+    candidates.sort(key=lambda c: -c["novelty_score"])
+    return candidates[:10]
+
+
+def detect_trends(conn) -> tuple[list[dict], bool]:
+    """Detect novel trends using BERTrend + tactical pattern detection + LLM synthesis.
+
+    Two complementary detectors run in sequence:
+      1. BERTrend: clusters article embeddings over time, tracks which clusters grow.
+         Good at detecting "something is being talked about more" (momentum).
+      2. Tactical patterns: extracts structured role→action→zone patterns, scores them
+         against historical baselines. Good at detecting "one team is quietly doing
+         something new" (novelty).
+
+    Results from both detectors are merged and deduplicated. The combined list
+    gives the report pipeline stronger candidates than either detector alone.
 
     Returns (candidates, had_error) matching the existing pipeline interface.
     """
@@ -676,7 +852,9 @@ def detect_trends(conn) -> tuple[list[dict], bool]:
         cur.execute("SELECT title FROM reports ORDER BY created_at DESC LIMIT 10")
         past = [r[0] for r in cur.fetchall()]
 
-    # ── BERTrend algorithmic detection ────────────────────────────────────────
+    all_candidates = []
+
+    # ── Detector 1: BERTrend algorithmic detection ───────────────────────────
     try:
         signals = run_bertrend_detection(conn, cfg_path=cfg_path)
         if signals:
@@ -692,17 +870,52 @@ def detect_trends(conn) -> tuple[list[dict], bool]:
                 past_topics=past,
             )
             if candidates:
+                for c in candidates:
+                    c["detection_method"] = "bertrend"
                 log.info("BERTrend + LLM produced %d trend candidates", len(candidates))
-                return candidates, False
-
-            log.info("BERTrend signals found but LLM synthesis returned no candidates")
+                all_candidates.extend(candidates)
         else:
-            log.info("BERTrend found no non-noise signals, falling back to LLM-only detection")
+            log.info("BERTrend found no non-noise signals")
 
     except Exception as e:
-        log.warning("BERTrend detection failed (%s), falling back to LLM-only detection", e)
+        log.warning("BERTrend detection failed (%s): %s", type(e).__name__, e)
+
+    # ── Detector 2: Tactical pattern novelty detection ───────────────────────
+    try:
+        pattern_candidates = _detect_novel_tactical_patterns(conn, past)
+        if pattern_candidates:
+            log.info("Tactical pattern detector found %d novel candidates", len(pattern_candidates))
+            all_candidates.extend(pattern_candidates)
+    except Exception as e:
+        log.warning("Tactical pattern detection failed (%s): %s", type(e).__name__, e)
+
+    # ── Merge and deduplicate ────────────────────────────────────────────────
+    if all_candidates:
+        # Deduplicate by checking semantic overlap between candidates
+        seen_trends = set()
+        deduped = []
+        for c in sorted(all_candidates, key=lambda x: -x.get("score", 0)):
+            trend_lower = c["trend"].lower().strip()
+            # Simple dedup: skip if a very similar trend text already exists
+            is_dupe = False
+            for seen in seen_trends:
+                # Check word overlap
+                words_new = set(trend_lower.split())
+                words_seen = set(seen.split())
+                if len(words_new & words_seen) / max(1, len(words_new | words_seen)) > 0.6:
+                    is_dupe = True
+                    break
+            if not is_dupe:
+                seen_trends.add(trend_lower)
+                deduped.append(c)
+        all_candidates = deduped
+        log.info("After deduplication: %d unique candidates", len(all_candidates))
+
+    if all_candidates:
+        return all_candidates, False
 
     # ── Fallback: LLM-only detection (original approach) ─────────────────────
+    log.info("Both detectors returned nothing, falling back to LLM-only detection")
     return _detect_trends_llm_only(conn, past)
 
 
@@ -748,7 +961,7 @@ def _detect_trends_llm_only(conn, past) -> tuple[list[dict], bool]:
     try:
         text = ask(
             "You are a football tactics analyst spotting novel trends before they go mainstream.",
-            f"Recent articles and transcripts:\n{'\n'.join(summaries)}\n\n"
+            "Recent articles and transcripts:\n" + "\n".join(summaries) + "\n\n"
             f"Already-covered topics (avoid repeating):\n{past_block}\n\n"
             "Identify the top 5 most novel tactical or strategic trends being tried by football "
             "players or teams. Rank them by novelty — things not yet widely adopted get higher scores.\n\n"
@@ -1278,14 +1491,41 @@ def run_detect(conn, min_new_sources=0):
         feedback_embeddings = _load_feedback_embeddings(conn)
         if feedback_embeddings:
             log.info("Loaded %d feedback embeddings for semantic matching", len(feedback_embeddings))
+
+        # ── Novelty scoring for candidates that don't already have it ────────
+        candidates_needing_novelty = [c for c in candidates if "novelty_score" not in c]
+        if candidates_needing_novelty:
+            novelty_texts = [c["trend"] for c in candidates_needing_novelty]
+            novelty_vecs = embed(novelty_texts)
+            if novelty_vecs:
+                for c, vec in zip(candidates_needing_novelty, novelty_vecs):
+                    src_count = len(c.get("sources") or [])
+                    c["novelty_score"] = compute_novelty_score(conn, c["trend"], vec, source_count=src_count)
+                    c["_embedding"] = vec  # stash for baseline update
+
         with conn.cursor() as cur:
             stored_scores = []
             for c in candidates:
                 feedback_adjustment = _feedback_adjustment_for_trend(c["trend"], keyword_weights, feedback_embeddings)
-                final_score = max(0, min(100, int(c["score"]) + feedback_adjustment))
+                base_score = int(c["score"])
+                novelty = c.get("novelty_score")
+
+                # Novelty bonus/penalty: high novelty boosts score, low novelty suppresses
+                novelty_adjustment = 0
+                if novelty is not None:
+                    # Scale: novelty 0.0 → -15, novelty 0.5 → 0, novelty 1.0 → +15
+                    novelty_adjustment = int(round((novelty - 0.5) * 30))
+
+                final_score = max(0, min(100, base_score + feedback_adjustment + novelty_adjustment))
+                source_diversity = c.get("source_diversity", len(c.get("sources") or []))
+
                 cur.execute(
-                    "INSERT INTO trend_candidates (trend, reasoning, score, feedback_adjustment, final_score) VALUES (%s, %s, %s, %s, %s) RETURNING id",
-                    (c["trend"], c.get("reasoning"), c["score"], feedback_adjustment, final_score),
+                    "INSERT INTO trend_candidates "
+                    "(trend, reasoning, score, feedback_adjustment, final_score, "
+                    "novelty_score, source_diversity) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                    (c["trend"], c.get("reasoning"), base_score, feedback_adjustment,
+                     final_score, novelty, source_diversity),
                 )
                 trend_candidate_id = cur.fetchone()[0]
                 for source in c.get("sources") or []:
@@ -1294,6 +1534,12 @@ def run_detect(conn, min_new_sources=0):
                         (trend_candidate_id, source["source_id"]),
                     )
                 stored_scores.append(final_score)
+
+                # Update novelty baseline so future similar concepts register as less novel
+                trend_vec = c.get("_embedding")
+                if trend_vec:
+                    update_baseline(conn, c["trend"], trend_vec, source_count=source_diversity)
+
         conn.commit()
         log.info("Stored %d trend candidates (top final score: %d)", len(candidates), max(stored_scores))
     else:
@@ -1301,21 +1547,65 @@ def run_detect(conn, min_new_sources=0):
 
 
 def run_report(conn):
+    """Select the top pending candidate that clears a quality gate, then generate a report.
+
+    Quality gate:
+      - final_score >= 40 (meaningful signal, not noise)
+      - source_diversity >= 2 (corroborated by multiple sources, not an outlier)
+
+    Candidates below the gate are skipped rather than wasting expensive report
+    generation on weak or single-source signals.
+    """
+    min_score = int(_CFG.get("report_min_score", 40))
+    min_sources = int(_CFG.get("report_min_sources", 2))
+
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, trend FROM trend_candidates WHERE status = 'pending' ORDER BY COALESCE(final_score, score) DESC, detected_at DESC LIMIT 1"
+            "SELECT id, trend, COALESCE(final_score, score) AS effective_score, "
+            "COALESCE(source_diversity, 0) AS src_div "
+            "FROM trend_candidates WHERE status = 'pending' "
+            "ORDER BY COALESCE(final_score, score) DESC, detected_at DESC LIMIT 5"
         )
-        row = cur.fetchone()
-    if not row:
+        rows = cur.fetchall()
+
+    if not rows:
         log.info("No pending trend candidates — skipping report")
         return
-    candidate_id, trend = row
-    log.info("Generating report for trend: %s", trend)
+
+    # Find the best candidate that passes the quality gate
+    chosen = None
+    skipped_ids = []
+    for row in rows:
+        cid, trend, eff_score, src_div = row
+        if eff_score >= min_score and src_div >= min_sources:
+            chosen = (cid, trend, eff_score, src_div)
+            break
+        else:
+            log.info("Skipping candidate '%s' (score=%d, sources=%d) — below quality gate",
+                     trend[:60], eff_score, src_div)
+            skipped_ids.append(cid)
+
+    # Skip candidates that didn't meet the gate
+    if skipped_ids:
+        with conn.cursor() as cur:
+            placeholders = ",".join(["%s"] * len(skipped_ids))
+            cur.execute(
+                f"UPDATE trend_candidates SET status = 'skipped' WHERE id IN ({placeholders})",
+                skipped_ids,
+            )
+        conn.commit()
+
+    if not chosen:
+        log.info("No candidates passed the quality gate (min_score=%d, min_sources=%d)",
+                 min_score, min_sources)
+        return
+
+    candidate_id, trend, eff_score, src_div = chosen
+    log.info("Generating report for trend: %s (score=%d, sources=%d)", trend, eff_score, src_div)
     generate_report(conn, trend)
     with conn.cursor() as cur:
         cur.execute(
-            "UPDATE trend_candidates SET status = CASE WHEN id = %s THEN 'reported' ELSE 'skipped' END "
-            "WHERE status = 'pending'",
+            "UPDATE trend_candidates SET status = 'reported' WHERE id = %s",
             (candidate_id,),
         )
     conn.commit()

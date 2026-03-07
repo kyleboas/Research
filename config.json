@@ -21,5 +21,8 @@
     "rolling_window_days": 7,
     "top_k_signals": 10,
     "tfidf_top_n": 8
-  }
+  },
+
+  "report_min_score": 40,
+  "report_min_sources": 2
 }
