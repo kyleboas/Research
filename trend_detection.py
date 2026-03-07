@@ -606,24 +606,48 @@ def describe_signals_with_llm(conn, signals, ask_fn, past_topics=None):
     candidates = _parse_json_safe(text).get("candidates", [])
 
     # Attach source metadata
+    source_by_exact_title = {}
+    source_by_normalized_title = {}
+
+    def _normalize_title(value):
+        return " ".join("".join(ch.lower() if ch.isalnum() else " " for ch in str(value)).split())
+
+    for cd in chunk_data.values():
+        title = (cd.get("title") or "").strip()
+        if not title:
+            continue
+        source_by_exact_title.setdefault(title, []).append(cd)
+        source_by_normalized_title.setdefault(_normalize_title(title), []).append(cd)
+
     valid = []
     for c in candidates:
         if not (isinstance(c, dict) and c.get("trend") and isinstance(c.get("score"), int)):
             continue
 
-        # Map source_titles to source records
         matched_sources = []
         seen_source_ids = set()
         for title in c.get("source_titles") or []:
-            title = str(title).strip()
-            for cd in chunk_data.values():
-                if cd["title"] and cd["title"].strip() == title and cd["source_id"] not in seen_source_ids:
-                    matched_sources.append({
-                        "source_id": cd["source_id"],
-                        "title": cd["title"],
-                        "url": cd["url"] or "",
-                    })
-                    seen_source_ids.add(cd["source_id"])
+            query_title = str(title).strip()
+            query_normalized = _normalize_title(query_title)
+
+            potential_matches = []
+            potential_matches.extend(source_by_exact_title.get(query_title, []))
+            potential_matches.extend(source_by_normalized_title.get(query_normalized, []))
+
+            if query_normalized:
+                for known_normalized, known in source_by_normalized_title.items():
+                    if query_normalized in known_normalized or known_normalized in query_normalized:
+                        potential_matches.extend(known)
+
+            for cd in potential_matches:
+                if cd["source_id"] in seen_source_ids:
+                    continue
+                matched_sources.append({
+                    "source_id": cd["source_id"],
+                    "title": cd["title"],
+                    "url": cd["url"] or "",
+                })
+                seen_source_ids.add(cd["source_id"])
 
         c["sources"] = matched_sources
         valid.append(c)
