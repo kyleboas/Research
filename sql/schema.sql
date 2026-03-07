@@ -7,11 +7,24 @@ CREATE TABLE IF NOT EXISTS sources (
     title TEXT,
     url TEXT,
     content TEXT NOT NULL,
+    author TEXT,
+    publish_date DATE,
+    sitename TEXT,
+    extraction_method TEXT DEFAULT 'rss',
+    metadata JSONB DEFAULT '{}'::JSONB,
     search_tsv TSVECTOR GENERATED ALWAYS AS (
         TO_TSVECTOR('english', COALESCE(title, '') || ' ' || COALESCE(LEFT(content, 2000), ''))
     ) STORED,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Migrate: add new columns to existing sources table
+ALTER TABLE sources
+    ADD COLUMN IF NOT EXISTS author TEXT,
+    ADD COLUMN IF NOT EXISTS publish_date DATE,
+    ADD COLUMN IF NOT EXISTS sitename TEXT,
+    ADD COLUMN IF NOT EXISTS extraction_method TEXT DEFAULT 'rss',
+    ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::JSONB;
 
 CREATE TABLE IF NOT EXISTS chunks (
     id BIGSERIAL PRIMARY KEY,
@@ -74,6 +87,46 @@ CREATE INDEX IF NOT EXISTS idx_trend_feedback_created_at ON trend_feedback (crea
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
 CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON chunks USING GIN (search_tsv);
 CREATE INDEX IF NOT EXISTS idx_sources_tsv ON sources USING GIN (search_tsv);
+
+-- Tactical patterns extracted from chunks (actor → action → context)
+CREATE TABLE IF NOT EXISTS tactical_patterns (
+    id BIGSERIAL PRIMARY KEY,
+    source_id BIGINT REFERENCES sources(id) ON DELETE CASCADE,
+    chunk_id BIGINT REFERENCES chunks(id) ON DELETE CASCADE,
+    pattern_type TEXT NOT NULL,
+    actor TEXT,
+    action TEXT NOT NULL,
+    context TEXT,
+    teams TEXT[],
+    players TEXT[],
+    zones TEXT[],
+    phase TEXT,
+    embedding VECTOR(1536),
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_tactical_patterns_created_at ON tactical_patterns (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tactical_patterns_type ON tactical_patterns (pattern_type);
+CREATE INDEX IF NOT EXISTS idx_tactical_patterns_embedding ON tactical_patterns USING ivfflat (embedding vector_cosine_ops) WITH (lists = 50);
+
+-- Historical novelty baselines: embeddings of previously seen tactical concepts
+CREATE TABLE IF NOT EXISTS novelty_baselines (
+    id BIGSERIAL PRIMARY KEY,
+    concept TEXT NOT NULL,
+    embedding VECTOR(1536) NOT NULL,
+    first_seen TIMESTAMPTZ DEFAULT NOW(),
+    last_seen TIMESTAMPTZ DEFAULT NOW(),
+    occurrence_count INT DEFAULT 1,
+    source_count INT DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_novelty_baselines_embedding ON novelty_baselines USING ivfflat (embedding vector_cosine_ops) WITH (lists = 50);
+
+-- Add novelty_score column to trend_candidates
+ALTER TABLE trend_candidates
+    ADD COLUMN IF NOT EXISTS novelty_score DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS source_diversity INT DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS pattern_ids BIGINT[];
 
 -- BERTrend topic tracker state (JSON snapshot of TopicTracker)
 CREATE TABLE IF NOT EXISTS topic_snapshots (

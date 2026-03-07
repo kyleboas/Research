@@ -2,3 +2,5 @@ openai
 psycopg[binary]
 numpy
 scikit-learn
+trafilatura
+readability-lxml
