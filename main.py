@@ -18,6 +18,7 @@ from urllib.request import Request, urlopen, build_opener, HTTPCookieProcessor
 
 import openai, psycopg
 from db_conn import resolve_database_conninfo
+from trend_detection import run_bertrend_detection, describe_signals_with_llm
 
 log = logging.getLogger("research")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -35,24 +36,30 @@ CLOUDFLARE_GATEWAY_TOKEN = os.environ["CLOUDFLARE_GATEWAY_TOKEN"]
 _cfg_path = ROOT / "config.json"
 _CFG: dict = json.loads(_cfg_path.read_text()) if _cfg_path.exists() else {}
 
-LEAD_MODEL  = os.environ.get("LEAD_MODEL")  or _CFG.get("lead_model",  "o3")
-MODEL       = os.environ.get("MODEL")       or _CFG.get("model",       "gpt-4o")
-EMBED_MODEL = os.environ.get("EMBED_MODEL") or _CFG.get("embed_model", "text-embedding-3-small")
+LEAD_MODEL    = os.environ.get("LEAD_MODEL")    or _CFG.get("lead_model",    "deepseek/deepseek-r1")
+MODEL         = os.environ.get("MODEL")         or _CFG.get("model",         "google/gemini-2.5-flash")
+EMBED_MODEL   = os.environ.get("EMBED_MODEL")   or _CFG.get("embed_model",   "openai/text-embedding-3-small")
+SIGNAL_MODEL  = os.environ.get("SIGNAL_MODEL")  or _CFG.get("signal_model",  "workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast")
+
+# ── Per-step model overrides (quality-critical steps use Opus/Sonnet) ─────────
+SYNTHESIS_MODEL = os.environ.get("SYNTHESIS_MODEL") or _CFG.get("synthesis_model", "anthropic/claude-opus-4-6")
+SUMMARY_MODEL   = os.environ.get("SUMMARY_MODEL")  or _CFG.get("summary_model",   "anthropic/claude-sonnet-4-6")
+REVISION_MODEL  = os.environ.get("REVISION_MODEL")  or _CFG.get("revision_model",  "anthropic/claude-opus-4-6")
+CITATION_MODEL  = os.environ.get("CITATION_MODEL")  or _CFG.get("citation_model",  "google/gemini-2.5-flash")
+EVAL_MODEL      = os.environ.get("EVAL_MODEL")      or _CFG.get("eval_model",      "google/gemini-2.5-flash")
 
 
 def _normalize_cloudflare_base_urls(raw_url: str):
     """Return SDK-safe chat/embeddings base URLs from a Cloudflare Gateway URL.
 
     Supported inputs:
-    - .../openai
-    - .../openai/chat/completions
-    - .../compat/chat/completions
-    - .../compat
+    - .../openai             → kept as-is (OpenAI-only route)
+    - .../openai/chat/completions → trimmed to .../openai
+    - .../compat/chat/completions → trimmed to .../compat
+    - .../compat             → kept as-is (unified route, supports all providers via model prefix)
 
-    All inputs are normalised to use the /openai provider route so that the
-    OpenAI SDK appends /chat/completions and /embeddings to a valid provider
-    path.  Plain prefix + "/v1" is not a valid AI Gateway provider route and
-    produces a 400 Invalid provider response.
+    The /compat endpoint is the unified AI Gateway route. Model names must be
+    prefixed with the provider (e.g. "openai/gpt-4o", "workers-ai/@cf/meta/llama-...").
     """
     base = raw_url.rstrip("/")
 
@@ -64,14 +71,10 @@ def _normalize_cloudflare_base_urls(raw_url: str):
         return base, base
 
     if base.endswith("/compat/chat/completions"):
-        prefix = base[: -len("/compat/chat/completions")]
-        provider = f"{prefix}/openai"
-        return provider, provider
+        return base[: -len("/chat/completions")], base[: -len("/chat/completions")]
 
     if base.endswith("/compat"):
-        prefix = base[: -len("/compat")]
-        provider = f"{prefix}/openai"
-        return provider, provider
+        return base, base
 
     return base, base
 
@@ -92,6 +95,8 @@ _chat_base_url, _embed_base_url = _normalize_cloudflare_base_urls(CLOUDFLARE_GAT
 log.info("Cloudflare chat base URL: %s", _chat_base_url)
 if _embed_base_url != _chat_base_url:
     log.info("Cloudflare embeddings base URL: %s", _embed_base_url)
+log.info("Model config: lead=%s eval=%s summary=%s synthesis=%s citation=%s revision=%s",
+         LEAD_MODEL, EVAL_MODEL, SUMMARY_MODEL, SYNTHESIS_MODEL, CITATION_MODEL, REVISION_MODEL)
 
 
 def get_chat_client():
@@ -109,6 +114,66 @@ def get_embed_client():
 
 
 CITATION_FMT = "Cite every claim as [S<source_id>:C<chunk_id>]. Never cite IDs not in the provided context."
+
+# ── Static system prompts (extracted for prompt caching) ──────────────────────
+# Anthropic models cache repeated prompt prefixes automatically.
+# By keeping system prompts as constants, identical prefixes across calls
+# hit the cache ($0.50/MTok instead of $5.00/MTok for Opus 4.6).
+
+SYS_OODA_EVAL = (
+    "You are evaluating retrieval sufficiency for a research subagent following "
+    "the OODA loop (Observe-Orient-Decide-Act).\n\n"
+    "OBSERVE: Review the chunks collected so far.\n"
+    "ORIENT: Compare against the research objective — what's covered vs what's missing?\n"
+    "DECIDE: Is evidence sufficient, or do we need another retrieval round?\n\n"
+    "If more retrieval is needed, generate a query that is NARROWER and MORE SPECIFIC "
+    "than previous queries — do not repeat broad searches."
+)
+
+SYS_SUBAGENT = (
+    f"You are a focused research subagent. {CITATION_FMT}\n\n"
+    "Stay strictly within your assigned boundaries. Do not speculate beyond "
+    "what the evidence supports. If evidence is thin, say so explicitly."
+)
+
+SYS_SYNTHESIS = (
+    f"You are a synthesis editor merging multiple subagent research outputs into "
+    f"one coherent, publication-quality research report. {CITATION_FMT}"
+)
+
+SYS_CITATION = (
+    "You are a CitationAgent. Your SOLE job is to verify citations in a research report.\n\n"
+    "For EVERY citation [S<source_id>:C<chunk_id>] in the report:\n"
+    "1. Verify the source_id and chunk_id exist in the provided chunks\n"
+    "2. Verify the cited claim is actually supported by that chunk's content\n"
+    "3. Check for claims that SHOULD have citations but don't\n"
+    "4. Check for fabricated/hallucinated citation IDs\n\n"
+    "You must also verify the Sources section at the end lists accurate titles and URLs."
+)
+
+SYS_REVISION = (
+    f"You are a revision editor producing the final research report. {CITATION_FMT}\n\n"
+    "You have received a citation verification report from the CitationAgent. "
+    "Apply every directive precisely. The final report must have zero citation errors."
+)
+
+SYS_DECOMPOSE = (
+    "You are a LeadResearcher orchestrating a multi-agent deep research system. "
+    "Your job is to decompose the research topic into non-overlapping subagent tasks "
+    "with clear boundaries. Each subagent will run independently with its own context window.\n\n"
+    "EFFORT SCALING RULES:\n"
+    "- Simple fact-finding: 1-2 subagents, max_rounds=2, 3-5 search queries each\n"
+    "- Moderate analysis: 3-4 subagents, max_rounds=3, 3-5 search queries each\n"
+    "- Complex multi-faceted research: 5-7 subagents, max_rounds=5, 4-6 search queries each\n\n"
+    "You MUST assess which complexity level applies and set parameters accordingly."
+)
+
+SYS_SUFFICIENCY = (
+    "You are the LeadResearcher evaluating whether the synthesized research is sufficient "
+    "or whether additional subagent research rounds are needed.\n\n"
+    "Be critical but pragmatic. Only request additional research if there are SPECIFIC, "
+    "ACTIONABLE gaps that more retrieval could realistically fill."
+)
 
 # ══════════════════════════════════════════════
 # Feed parsing (YouTube only)
@@ -405,6 +470,7 @@ def ask_thinking(system, user, budget_tokens=10000, max_tokens=16000):
     )
     return "", resp.choices[0].message.content
 
+
 def parse_json(text):
     """Extract JSON from a text response.
 
@@ -492,6 +558,56 @@ def _feedback_adjustment_for_trend(trend: str, keyword_weights: dict[str, int]) 
 
 
 def detect_trends(conn) -> tuple[list[dict], bool]:
+    """Detect novel trends using BERTrend weak signal detection + LLM synthesis.
+
+    Pipeline:
+      1. Run BERTrend clustering on chunk embeddings across time windows
+      2. Track topic evolution with merging and exponential decay
+      3. Classify signals as noise/weak/strong via rolling percentile thresholds
+      4. Feed algorithmic signals into LLM for human-readable trend descriptions
+      5. Fall back to LLM-only detection if BERTrend finds nothing
+
+    Returns (candidates, had_error) matching the existing pipeline interface.
+    """
+    cfg_path = ROOT / "config.json"
+
+    # Fetch past report titles to avoid repeats
+    with conn.cursor() as cur:
+        cur.execute("SELECT title FROM reports ORDER BY created_at DESC LIMIT 10")
+        past = [r[0] for r in cur.fetchall()]
+
+    # ── BERTrend algorithmic detection ────────────────────────────────────────
+    try:
+        signals = run_bertrend_detection(conn, cfg_path=cfg_path)
+        if signals:
+            log.info("BERTrend detected %d signals (%d weak, %d strong)",
+                     len(signals),
+                     sum(1 for s in signals if s["signal_class"] == "weak"),
+                     sum(1 for s in signals if s["signal_class"] == "strong"))
+
+            # Use LLM to synthesize signals into trend descriptions
+            candidates = describe_signals_with_llm(
+                conn, signals,
+                lambda sys, usr: ask(sys, usr, model=SIGNAL_MODEL),
+                past_topics=past,
+            )
+            if candidates:
+                log.info("BERTrend + LLM produced %d trend candidates", len(candidates))
+                return candidates, False
+
+            log.info("BERTrend signals found but LLM synthesis returned no candidates")
+        else:
+            log.info("BERTrend found no non-noise signals, falling back to LLM-only detection")
+
+    except Exception as e:
+        log.warning("BERTrend detection failed (%s), falling back to LLM-only detection", e)
+
+    # ── Fallback: LLM-only detection (original approach) ─────────────────────
+    return _detect_trends_llm_only(conn, past)
+
+
+def _detect_trends_llm_only(conn, past) -> tuple[list[dict], bool]:
+    """Original LLM-only trend detection as fallback."""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT id, title, url, LEFT(content, 500) FROM sources "
@@ -514,9 +630,6 @@ def detect_trends(conn) -> tuple[list[dict], bool]:
             }
         )
 
-    with conn.cursor() as cur:
-        cur.execute("SELECT title FROM reports ORDER BY created_at DESC LIMIT 10")
-        past = [r[0] for r in cur.fetchall()]
     past_block = "\n".join(f"- {t}" for t in past) if past else "(none)"
 
     try:
@@ -533,7 +646,7 @@ def detect_trends(conn) -> tuple[list[dict], bool]:
             '{"trend": "<10-20 word description>", "reasoning": "<why novel>", "score": <0-100>, "source_titles": ["<exact title>"]}'
             ', ...]}'
         )
-        log.info("Trend detection raw response: %r", text)
+        log.info("LLM-only trend detection raw response: %r", text)
         candidates = parse_json(text).get("candidates", [])
         valid = []
         for c in candidates:
@@ -557,7 +670,7 @@ def detect_trends(conn) -> tuple[list[dict], bool]:
 
         return valid, False
     except Exception as e:
-        log.warning("Trend detection failed: %s", e)
+        log.warning("LLM-only trend detection failed: %s", e)
         return [], True
 
 # ══════════════════════════════════════════════
@@ -571,14 +684,7 @@ def decompose_topic(trend):
     and calibrates the number of subagents and retrieval depth accordingly.
     """
     thinking, response = ask_thinking(
-        "You are a LeadResearcher orchestrating a multi-agent deep research system. "
-        "Your job is to decompose the research topic into non-overlapping subagent tasks "
-        "with clear boundaries. Each subagent will run independently with its own context window.\n\n"
-        "EFFORT SCALING RULES:\n"
-        "- Simple fact-finding: 1-2 subagents, max_rounds=2, 3-5 search queries each\n"
-        "- Moderate analysis: 3-4 subagents, max_rounds=3, 3-5 search queries each\n"
-        "- Complex multi-faceted research: 5-7 subagents, max_rounds=5, 4-6 search queries each\n\n"
-        "You MUST assess which complexity level applies and set parameters accordingly.",
+        SYS_DECOMPOSE,
 
         f"Research topic: {trend}\n\n"
         "Think step by step:\n"
@@ -652,13 +758,7 @@ def research_angle(conn, trend, task):
         chunk_json = chunks_to_context(list(all_chunks.values()))
         try:
             eval_text = ask(
-                "You are evaluating retrieval sufficiency for a research subagent following "
-                "the OODA loop (Observe-Orient-Decide-Act).\n\n"
-                "OBSERVE: Review the chunks collected so far.\n"
-                "ORIENT: Compare against the research objective — what's covered vs what's missing?\n"
-                "DECIDE: Is evidence sufficient, or do we need another retrieval round?\n\n"
-                "If more retrieval is needed, generate a query that is NARROWER and MORE SPECIFIC "
-                "than previous queries — do not repeat broad searches.",
+                SYS_OODA_EVAL,
 
                 f"Angle: {angle}\n"
                 f"Objective: {objective}\n"
@@ -666,7 +766,8 @@ def research_angle(conn, trend, task):
                 f"Previous queries: {json.dumps(queries[:round_num + 1])}\n\n"
                 f"Chunks collected ({len(all_chunks)} total):\n{chunk_json}\n\n"
                 'Return JSON: {{"sufficient": true/false, "coverage_pct": 0-100, '
-                '"gaps": ["specific gap 1", ...], "next_query": "narrower query" or null}}'
+                '"gaps": ["specific gap 1", ...], "next_query": "narrower query" or null}}',
+                model=EVAL_MODEL,
             )
             eval_result = parse_json(eval_text)
         except Exception:
@@ -684,16 +785,17 @@ def research_angle(conn, trend, task):
         if next_q:
             queries.append(next_q)
 
+    last_coverage = eval_result.get("coverage_pct", 50) if 'eval_result' in dir() else 50
+
     if not all_chunks:
         return {"angle": angle, "summary": f"No evidence found for: {angle}",
                 "chunks": [], "coverage": 0}
 
-    # Write grounded summary for this angle
     chunk_json = chunks_to_context(list(all_chunks.values()))
+
+    # Write grounded summary for this angle
     summary = ask(
-        f"You are a focused research subagent. {CITATION_FMT}\n\n"
-        "Stay strictly within your assigned boundaries. Do not speculate beyond "
-        "what the evidence supports. If evidence is thin, say so explicitly.",
+        SYS_SUBAGENT,
 
         f"Angle: {angle}\n"
         f"Objective: {objective}\n"
@@ -704,11 +806,12 @@ def research_angle(conn, trend, task):
         "- Use inline citations [S<source_id>:C<chunk_id>] on every claim\n"
         "- Bold key statistics and figures\n"
         "- Note evidence quality and any limitations\n"
-        "- Flag if evidence was insufficient for any part of the objective"
+        "- Flag if evidence was insufficient for any part of the objective",
+        model=SUMMARY_MODEL,
     )
     log.info("Subagent '%s' done: %d chunks, %d rounds", angle, len(all_chunks), round_num + 1)
     return {"angle": angle, "summary": summary, "chunks": list(all_chunks.values()),
-            "coverage": eval_result.get("coverage_pct", 50) if 'eval_result' in dir() else 50}
+            "coverage": last_coverage}
 
 def run_subagents(conn, trend, tasks):
     """Run subagent research in parallel with bounded concurrency."""
@@ -750,8 +853,7 @@ def synthesize(trend, subagent_results):
     failed = [r["angle"] for r in subagent_results if not r["chunks"]]
 
     draft = ask(
-        f"You are a synthesis editor merging multiple subagent research outputs into "
-        f"one coherent, publication-quality research report. {CITATION_FMT}",
+        SYS_SYNTHESIS,
 
         f"Topic: {trend}\n\n"
         f"Subagent summaries:\n{summaries_text}\n\n"
@@ -782,6 +884,7 @@ def synthesize(trend, subagent_results):
         "- `---` separators between major sections\n"
         "- Flag any speculation explicitly\n"
         "- Acknowledge evidence gaps honestly",
+        model=SYNTHESIS_MODEL,
         max_tokens=12000,
     )
     return draft, chunk_json, all_chunks
@@ -802,10 +905,7 @@ def evaluate_sufficiency(trend, draft, subagent_results, chunk_json):
     )
 
     thinking, response = ask_thinking(
-        "You are the LeadResearcher evaluating whether the synthesized research is sufficient "
-        "or whether additional subagent research rounds are needed.\n\n"
-        "Be critical but pragmatic. Only request additional research if there are SPECIFIC, "
-        "ACTIONABLE gaps that more retrieval could realistically fill.",
+        SYS_SUFFICIENCY,
 
         f"Topic: {trend}\n\n"
         f"Subagent coverage:\n{coverage_summary}\n\n"
@@ -839,13 +939,7 @@ def verify_citations(trend, draft, chunk_json):
     documents and the research report to identify specific locations for citations.
     """
     return ask(
-        "You are a CitationAgent. Your SOLE job is to verify citations in a research report.\n\n"
-        "For EVERY citation [S<source_id>:C<chunk_id>] in the report:\n"
-        "1. Verify the source_id and chunk_id exist in the provided chunks\n"
-        "2. Verify the cited claim is actually supported by that chunk's content\n"
-        "3. Check for claims that SHOULD have citations but don't\n"
-        "4. Check for fabricated/hallucinated citation IDs\n\n"
-        "You must also verify the Sources section at the end lists accurate titles and URLs.",
+        SYS_CITATION,
 
         f"Topic: {trend}\n\n"
         f"Available source chunks:\n{chunk_json}\n\n"
@@ -866,6 +960,7 @@ def verify_citations(trend, draft, chunk_json):
         "Any sources listed that weren't cited, or cited sources not listed.\n\n"
         "## Revision Directives\n"
         "Ordered list of specific changes for the revision editor.",
+        model=CITATION_MODEL,
     )
 
 # ══════════════════════════════════════════════
@@ -875,9 +970,7 @@ def verify_citations(trend, draft, chunk_json):
 def revise(trend, draft, citation_report, chunk_json):
     """Produce the final report incorporating citation verification feedback."""
     return ask(
-        f"You are a revision editor producing the final research report. {CITATION_FMT}\n\n"
-        "You have received a citation verification report from the CitationAgent. "
-        "Apply every directive precisely. The final report must have zero citation errors.",
+        SYS_REVISION,
 
         f"Topic: {trend}\n\n"
         f"Source chunks:\n{chunk_json}\n\n"
@@ -902,6 +995,7 @@ def revise(trend, draft, citation_report, chunk_json):
         "8. Explicitly flag remaining speculation with qualifiers like "
         "\"evidence suggests\" or \"it appears that\"\n"
         "9. Use `---` separators between major sections",
+        model=REVISION_MODEL,
         max_tokens=12000,
     )
 
@@ -965,8 +1059,15 @@ def generate_report(conn, trend):
         "angles": [r["angle"] for r in all_subagent_results],
         "total_chunks": len(all_chunks),
         "research_rounds": research_round + 1,
-        "model": MODEL,
-        "lead_model": LEAD_MODEL,
+        "models": {
+            "lead": LEAD_MODEL,
+            "eval": EVAL_MODEL,
+            "summary": SUMMARY_MODEL,
+            "synthesis": SYNTHESIS_MODEL,
+            "citation": CITATION_MODEL,
+            "revision": REVISION_MODEL,
+            "signal": SIGNAL_MODEL,
+        },
     })
     with conn.cursor() as cur:
         cur.execute("INSERT INTO reports (title, content, metadata) VALUES (%s, %s, %s::jsonb)",

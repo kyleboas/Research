@@ -1,5 +1,25 @@
 {
-  "lead_model": "o3",
-  "model": "gpt-4o",
-  "embed_model": "text-embedding-3-small"
+  "lead_model": "deepseek/deepseek-r1",
+  "model": "google/gemini-2.5-flash",
+  "embed_model": "text-embedding-3-small",
+  "signal_model": "workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+
+  "synthesis_model": "anthropic/claude-opus-4-6",
+  "summary_model": "anthropic/claude-sonnet-4-6",
+  "revision_model": "anthropic/claude-opus-4-6",
+  "citation_model": "google/gemini-2.5-flash",
+  "eval_model": "google/gemini-2.5-flash",
+
+  "bertrend": {
+    "window_days": 1,
+    "lookback_days": 14,
+    "min_cluster_size": 3,
+    "merge_threshold": 0.7,
+    "decay_lambda": 0.01,
+    "noise_percentile": 10,
+    "weak_percentile": 50,
+    "rolling_window_days": 7,
+    "top_k_signals": 10,
+    "tfidf_top_n": 8
+  }
 }
