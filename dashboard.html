@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Research Workflow Dashboard</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #ffffff;
+        --surface: #ffffff;
+        --line: #e5e5e7;
+        --text: #111218;
+        --subtext: #6f7177;
+        --accent: #2f6fed;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      .wrap {
+        max-width: 920px;
+        margin: 0 auto;
+        padding: 0 16px 28px;
+      }
+
+      .header {
+        border-bottom: 1px solid var(--line);
+        padding: 16px 4px 14px;
+      }
+
+      .title {
+        margin: 0 0 16px;
+        text-align: center;
+        font-size: clamp(1.25rem, 3vw, 1.5rem);
+        line-height: 1.1;
+        letter-spacing: -0.02em;
+      }
+
+      .tabs {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .tab-btn {
+        border: 1px solid var(--line);
+        background: #f3f3f4;
+        color: #40424a;
+        border-radius: 999px;
+        padding: 8px 14px;
+        font-weight: 600;
+        font-size: 0.9rem;
+        cursor: pointer;
+        transition: 140ms ease;
+      }
+
+      .tab-btn:hover,
+      .tab-btn:focus-visible {
+        border-color: #ccd7ff;
+        color: #1c2a57;
+      }
+
+      .tab-btn.active {
+        border-color: transparent;
+        background: var(--accent);
+        color: #fff;
+      }
+
+      .tab {
+        display: none;
+        padding: 8px 4px 20px;
+      }
+
+      .tab.active { display: block; }
+
+      .list-item {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 12px;
+        border-bottom: 1px solid var(--line);
+        padding: 14px 0;
+        text-decoration: none;
+        color: inherit;
+      }
+
+      .list-item:last-child { border-bottom: 0; }
+
+      .item-title {
+        margin: 0;
+        font-size: 1.35rem;
+        line-height: 1.2;
+        letter-spacing: -0.015em;
+      }
+
+      .item-sub,
+      .item-meta {
+        margin: 3px 0 0;
+        color: var(--subtext);
+      }
+
+      .item-time {
+        align-self: end;
+        color: #8f9197;
+        font-size: 0.95rem;
+      }
+
+      .trend {
+        border-bottom: 1px solid var(--line);
+        padding: 14px 0;
+      }
+
+      .trend:last-child { border-bottom: 0; }
+
+      .trend h3 {
+        margin: 0 0 8px;
+        font-size: 1.2rem;
+      }
+
+      .rank {
+        display: inline-block;
+        min-width: 2ch;
+        margin-right: 8px;
+        color: var(--accent);
+      }
+
+      .source-thread {
+        margin: 0;
+        padding-left: 24px;
+        color: var(--subtext);
+      }
+
+      .source-thread li { margin: 6px 0; }
+
+      .status-grid {
+        display: grid;
+        gap: 12px;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        padding: 8px 0;
+      }
+
+      .status-card {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 14px;
+        background: #fafafb;
+      }
+
+      .status-label {
+        margin: 0;
+        color: var(--subtext);
+        font-size: 0.88rem;
+      }
+
+      .status-value {
+        margin: 4px 0 0;
+        font-size: 1.12rem;
+        font-weight: 700;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="wrap">
+      <header class="header">
+        <h1 class="title">Research Dashboard</h1>
+        <nav class="tabs" aria-label="Dashboard tabs">
+          <button class="tab-btn active" data-tab="logs">Logs</button>
+          <button class="tab-btn" data-tab="ingest">Ingest</button>
+          <button class="tab-btn" data-tab="detect">Detect</button>
+          <button class="tab-btn" data-tab="reports">Reports</button>
+          <button class="tab-btn" data-tab="status">Status</button>
+        </nav>
+      </header>
+
+      <section id="logs" class="tab active" aria-live="polite"></section>
+      <section id="ingest" class="tab"></section>
+      <section id="detect" class="tab"></section>
+      <section id="reports" class="tab"></section>
+      <section id="status" class="tab"></section>
+    </main>
+
+    <script>
+      const truncate = (text, length = 255) =>
+        text.length > length ? `${text.slice(0, length)}…` : text;
+
+      const logs = [
+        { event: "Trend ranking refreshed", detail: "Detect tab recalculated scores for 84 sources.", time: "19:21" },
+        { event: "Ingest completed", detail: "17 feed items normalized and saved.", time: "19:18" },
+        { event: "Cron started", detail: "Pipeline run #2487 kicked off.", time: "19:15" },
+      ];
+
+      const ingestItems = [
+        {
+          title: "He loves the club – Liverpool boss Arne Slot hails evergreen Andy Robertson",
+          publication: "The Independent",
+          description:
+            "Robertson impressed in the FA Cup win over Wolves and continues to set the standard for intensity and leadership as Liverpool rotate heavily ahead of a congested schedule.",
+          url: "https://www.independent.co.uk/",
+        },
+        {
+          title: "He was meant to take De Bruyne’s crown. Instead, Foden’s City career is flatlining",
+          publication: "The Guardian",
+          description:
+            "Playmaker has become peripheral as Manchester City chase another title run, with tactical shifts and role ambiguity limiting his direct impact in big fixtures this month.",
+          url: "https://www.theguardian.com/",
+        },
+      ];
+
+      const trends = [
+        {
+          name: "Premier League midfield role compression",
+          sources: ["The Athletic analysis", "Guardian tactical desk", "Club press conference transcripts"],
+        },
+        {
+          name: "Late-game set-piece variance",
+          sources: ["Opta blog", "BBC Match of the Day notes", "Independent match reports"],
+        },
+      ];
+
+      const reports = [
+        {
+          title: "Weekend Tactical Recap",
+          date: "2026-03-07",
+          description:
+            "Cross-league review of tactical trends observed in top-flight matches, including the rise in asymmetric fullback structures and how it changed pressing triggers.",
+          url: "https://example.com/reports/weekend-tactical-recap",
+        },
+        {
+          title: "Transfer Sentiment Tracker",
+          date: "2026-03-06",
+          description:
+            "Coverage intensity and sentiment signal shifts around top transfer targets, with source reliability weighting and conflict detection in rumor clusters.",
+          url: "https://example.com/reports/transfer-sentiment-tracker",
+        },
+      ];
+
+      const status = [
+        { label: "Workflow live", value: "Yes" },
+        { label: "Next cron job", value: "2026-03-07 19:30 UTC" },
+        { label: "Last run duration", value: "2m 11s" },
+        { label: "Database", value: "Connected" },
+      ];
+
+      const logsEl = document.getElementById("logs");
+      logs
+        .slice()
+        .sort((a, b) => b.time.localeCompare(a.time))
+        .forEach((item) => {
+          logsEl.insertAdjacentHTML(
+            "beforeend",
+            `<article class="list-item"><div><h2 class="item-title">${item.event}</h2><p class="item-sub">${item.detail}</p></div><span class="item-time">${item.time}</span></article>`
+          );
+        });
+
+      const ingestEl = document.getElementById("ingest");
+      ingestItems.forEach((item) => {
+        ingestEl.insertAdjacentHTML(
+          "beforeend",
+          `<a class="list-item" href="${item.url}" target="_blank" rel="noreferrer"><div><h2 class="item-title">${item.title}</h2><p class="item-sub">${truncate(item.description)}</p><p class="item-meta">${item.publication}</p></div><span class="item-time">↗</span></a>`
+        );
+      });
+
+      const detectEl = document.getElementById("detect");
+      trends.forEach((trend, index) => {
+        detectEl.insertAdjacentHTML(
+          "beforeend",
+          `<article class="trend"><h3><span class="rank">#${index + 1}</span>${trend.name}</h3><ul class="source-thread">${trend.sources
+            .map((source) => `<li>${source}</li>`)
+            .join("")}</ul></article>`
+        );
+      });
+
+      const reportsEl = document.getElementById("reports");
+      reports.forEach((report) => {
+        reportsEl.insertAdjacentHTML(
+          "beforeend",
+          `<a class="list-item" href="${report.url}" target="_blank" rel="noreferrer"><div><h2 class="item-title">${report.title}</h2><p class="item-sub">${truncate(report.description)}</p><p class="item-meta">${report.date}</p></div><span class="item-time">↗</span></a>`
+        );
+      });
+
+      const statusEl = document.getElementById("status");
+      statusEl.innerHTML = `<div class="status-grid">${status
+        .map(
+          (entry) =>
+            `<section class="status-card"><p class="status-label">${entry.label}</p><p class="status-value">${entry.value}</p></section>`
+        )
+        .join("")}</div>`;
+
+      const tabs = [...document.querySelectorAll(".tab-btn")];
+      tabs.forEach((btn) => {
+        btn.addEventListener("click", () => {
+          tabs.forEach((el) => el.classList.remove("active"));
+          document.querySelectorAll(".tab").forEach((el) => el.classList.remove("active"));
+          btn.classList.add("active");
+          document.getElementById(btn.dataset.tab).classList.add("active");
+        });
+      });
+    </script>
+  </body>
+</html>
