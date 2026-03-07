@@ -86,10 +86,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 "ingest": [],
                 "detect": [],
                 "reports": [],
-                "status": [
-                    {"label": "Workflow live", "value": "Unknown"},
-                    {"label": "Database", "value": "Unavailable"},
-                ],
+                "patterns": [],
+                "status": [],
                 "warning": warning,
             }
 
@@ -97,9 +95,12 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             with conn.cursor() as cur:
                 self._ensure_trend_candidate_scoring_columns(cur)
 
+                # ── Ingest: include extraction metadata ──
                 cur.execute(
                     """
-                    SELECT title, url, source_type, LEFT(content, 255), created_at
+                    SELECT title, url, source_type, LEFT(content, 255),
+                           created_at, author, sitename, extraction_method,
+                           publish_date, LENGTH(content) AS content_length
                     FROM sources
                     ORDER BY created_at DESC, id DESC
                     """
@@ -111,12 +112,33 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                         "source_type": row[2] or "unknown",
                         "description": row[3] or "",
                         "created_at": row[4].isoformat() if row[4] else None,
+                        "author": row[5] or None,
+                        "sitename": row[6] or None,
+                        "extraction_method": row[7] or "rss",
+                        "publish_date": row[8].isoformat() if row[8] else None,
+                        "content_length": row[9] or 0,
                     }
                     for row in cur.fetchall()
                 ]
 
                 cur.execute("SELECT to_regclass('trend_candidate_sources')")
                 has_trend_candidate_sources = cur.fetchone()[0] is not None
+
+                # ── Detect: include novelty_score, source_diversity ──
+                # Check if new columns exist
+                cur.execute(
+                    """
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_name = 'trend_candidates'
+                    AND column_name IN ('novelty_score', 'source_diversity')
+                    """
+                )
+                available_cols = {row[0] for row in cur.fetchall()}
+                has_novelty = "novelty_score" in available_cols
+                has_diversity = "source_diversity" in available_cols
+
+                novelty_select = "tc.novelty_score" if has_novelty else "NULL AS novelty_score"
+                diversity_select = "tc.source_diversity" if has_diversity else "0 AS source_diversity"
 
                 detect_query = """
                     SELECT
@@ -138,13 +160,17 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                                 ORDER BY s.created_at DESC, s.id DESC
                             ) FILTER (WHERE s.id IS NOT NULL),
                             '[]'::json
-                        )
+                        ),
+                        {novelty},
+                        {diversity}
                     FROM trend_candidates tc
                     {source_join}
                     GROUP BY tc.id
                     ORDER BY COALESCE(tc.final_score, tc.score) DESC, tc.detected_at DESC, tc.id DESC
                     LIMIT 50
                 """.format(
+                    novelty=novelty_select,
+                    diversity=diversity_select,
                     source_join=(
                         """
                         LEFT JOIN trend_candidate_sources tcs ON tcs.trend_candidate_id = tc.id
@@ -166,10 +192,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                         "status": row[6],
                         "detected_at": row[7].isoformat() if row[7] else None,
                         "sources": row[8] if isinstance(row[8], list) else [],
+                        "novelty_score": round(float(row[9]), 4) if row[9] is not None else None,
+                        "source_diversity": row[10] or 0,
                     }
                     for row in cur.fetchall()
                 ]
 
+                # ── Reports ──
                 cur.execute(
                     """
                     SELECT title, content, metadata, created_at
@@ -187,25 +216,102 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                             "description": (row[1] or "")[:255],
                             "url": (metadata.get("url") or "") if isinstance(metadata, dict) else "",
                             "created_at": row[3].isoformat() if row[3] else None,
+                            "metadata": metadata,
                         }
                     )
 
+                # ── Tactical patterns ──
+                cur.execute("SELECT to_regclass('tactical_patterns')")
+                has_patterns = cur.fetchone()[0] is not None
+
+                pattern_items = []
+                if has_patterns:
+                    cur.execute(
+                        """
+                        SELECT tp.id, tp.actor, tp.action, LEFT(tp.context, 200),
+                               tp.zones, tp.phase, tp.created_at,
+                               s.title AS source_title, s.url AS source_url
+                        FROM tactical_patterns tp
+                        LEFT JOIN sources s ON s.id = tp.source_id
+                        ORDER BY tp.created_at DESC
+                        LIMIT 100
+                        """
+                    )
+                    for row in cur.fetchall():
+                        pattern_items.append({
+                            "id": row[0],
+                            "actor": row[1] or "",
+                            "action": row[2] or "",
+                            "context": row[3] or "",
+                            "zones": row[4] if isinstance(row[4], list) else [],
+                            "phase": row[5] or "",
+                            "created_at": row[6].isoformat() if row[6] else None,
+                            "source_title": row[7] or "Unknown",
+                            "source_url": row[8] or "",
+                        })
+
+                # ── Counts ──
                 cur.execute("SELECT COUNT(*) FROM sources")
                 sources_count = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM chunks")
+                chunks_count = cur.fetchone()[0]
                 cur.execute("SELECT COUNT(*) FROM trend_candidates")
                 trends_count = cur.fetchone()[0]
                 cur.execute("SELECT COUNT(*) FROM reports")
                 reports_count = cur.fetchone()[0]
 
+                patterns_count = 0
+                if has_patterns:
+                    cur.execute("SELECT COUNT(*) FROM tactical_patterns")
+                    patterns_count = cur.fetchone()[0]
+
+                baselines_count = 0
+                cur.execute("SELECT to_regclass('novelty_baselines')")
+                if cur.fetchone()[0] is not None:
+                    cur.execute("SELECT COUNT(*) FROM novelty_baselines")
+                    baselines_count = cur.fetchone()[0]
+
+                # Extraction method breakdown
+                cur.execute(
+                    """
+                    SELECT COALESCE(extraction_method, 'rss') AS method, COUNT(*)
+                    FROM sources
+                    GROUP BY method ORDER BY COUNT(*) DESC
+                    """
+                )
+                extraction_breakdown = {row[0]: row[1] for row in cur.fetchall()}
+
+                # Source type breakdown
+                cur.execute(
+                    """
+                    SELECT source_type, COUNT(*)
+                    FROM sources
+                    GROUP BY source_type ORDER BY COUNT(*) DESC
+                    """
+                )
+                source_type_breakdown = {row[0]: row[1] for row in cur.fetchall()}
+
+                # Avg content length by extraction method
+                cur.execute(
+                    """
+                    SELECT COALESCE(extraction_method, 'rss') AS method,
+                           ROUND(AVG(LENGTH(content))) AS avg_len
+                    FROM sources
+                    GROUP BY method ORDER BY avg_len DESC
+                    """
+                )
+                avg_content_length = {row[0]: int(row[1]) for row in cur.fetchall()}
+
+                # Pipeline state
                 cur.execute(
                     """
                     SELECT key, value
                     FROM pipeline_state
-                    WHERE key IN ('last_ingest_completed_at', 'last_ingest_new_sources')
                     """
                 )
                 state = {row[0]: row[1] for row in cur.fetchall()}
 
+                # ── Logs ──
                 cur.execute(
                     """
                     SELECT event, detail, event_time
@@ -242,12 +348,15 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         status_items = [
             {"label": "Workflow live", "value": "Yes"},
             {"label": "Database", "value": "Connected"},
-            {"label": "Total ingested sources", "value": str(sources_count)},
-            {"label": "Total trend candidates", "value": str(trends_count)},
-            {"label": "Total reports", "value": str(reports_count)},
-            {"label": "Last ingest completed", "value": state.get("last_ingest_completed_at", "Unknown")},
-            {"label": "Sources added in last ingest", "value": state.get("last_ingest_new_sources", "Unknown")},
-            {"label": "Status generated at", "value": now.isoformat()},
+            {"label": "Total sources", "value": str(sources_count)},
+            {"label": "Total chunks", "value": str(chunks_count)},
+            {"label": "Tactical patterns", "value": str(patterns_count)},
+            {"label": "Novelty baselines", "value": str(baselines_count)},
+            {"label": "Trend candidates", "value": str(trends_count)},
+            {"label": "Reports", "value": str(reports_count)},
+            {"label": "Last ingest", "value": state.get("last_ingest_completed_at", "Unknown")},
+            {"label": "New sources (last ingest)", "value": state.get("last_ingest_new_sources", "Unknown")},
+            {"label": "Generated at", "value": now.isoformat()},
         ]
 
         return {
@@ -255,7 +364,22 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             "ingest": ingest_items,
             "detect": detect_items,
             "reports": report_items,
+            "patterns": pattern_items,
             "status": status_items,
+            "debug": {
+                "extraction_breakdown": extraction_breakdown,
+                "source_type_breakdown": source_type_breakdown,
+                "avg_content_length": avg_content_length,
+                "pipeline_state": state,
+                "counts": {
+                    "sources": sources_count,
+                    "chunks": chunks_count,
+                    "tactical_patterns": patterns_count,
+                    "novelty_baselines": baselines_count,
+                    "trend_candidates": trends_count,
+                    "reports": reports_count,
+                },
+            },
             "warning": None,
         }
 

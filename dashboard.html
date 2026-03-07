@@ -204,6 +204,121 @@
         color: var(--subtext);
         font-size: 0.93rem;
       }
+
+      /* ── Badges ── */
+      .badge {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 6px;
+        font-size: 0.78rem;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+      }
+      .badge-rss { background: #e8f0fe; color: #1a56db; }
+      .badge-trafilatura { background: #d1fae5; color: #065f46; }
+      .badge-readability { background: #fef3c7; color: #92400e; }
+      .badge-html_strip { background: #fee2e2; color: #991b1b; }
+      .badge-fallback { background: #f3f4f6; color: #6b7280; }
+      .badge-youtube { background: #fce7f3; color: #9d174d; }
+
+      .badge-pending { background: #fef3c7; color: #92400e; }
+      .badge-reported { background: #d1fae5; color: #065f46; }
+      .badge-skipped { background: #f3f4f6; color: #6b7280; }
+
+      .badge-novelty-high { background: #d1fae5; color: #065f46; }
+      .badge-novelty-mid { background: #fef3c7; color: #92400e; }
+      .badge-novelty-low { background: #fee2e2; color: #991b1b; }
+
+      /* ── Score breakdown bar ── */
+      .score-breakdown {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin: 4px 0;
+        font-size: 0.85rem;
+      }
+      .score-breakdown .score-part {
+        padding: 2px 6px;
+        border-radius: 4px;
+        background: #f0f1f3;
+        font-weight: 500;
+        white-space: nowrap;
+      }
+      .score-breakdown .score-part.positive { background: #d1fae5; color: #065f46; }
+      .score-breakdown .score-part.negative { background: #fee2e2; color: #991b1b; }
+      .score-breakdown .score-total {
+        font-weight: 700;
+        font-size: 1rem;
+      }
+
+      /* ── Pattern card ── */
+      .pattern-card {
+        border-bottom: 1px solid var(--line);
+        padding: 12px 0;
+      }
+      .pattern-card:last-child { border-bottom: 0; }
+      .pattern-header {
+        display: flex;
+        gap: 8px;
+        align-items: baseline;
+        flex-wrap: wrap;
+      }
+      .pattern-actor { font-weight: 700; color: var(--accent); }
+      .pattern-action { font-weight: 600; }
+      .pattern-meta {
+        margin: 4px 0 0;
+        color: var(--subtext);
+        font-size: 0.9rem;
+      }
+      .pattern-context {
+        margin: 6px 0 0;
+        padding: 8px 12px;
+        background: #f8f9fa;
+        border-radius: 8px;
+        font-size: 0.88rem;
+        color: #374151;
+        line-height: 1.45;
+      }
+
+      /* ── Debug section ── */
+      .debug-section {
+        margin-top: 24px;
+        padding-top: 16px;
+        border-top: 2px solid var(--line);
+      }
+      .debug-section h2 {
+        margin: 0 0 12px;
+        font-size: 1.1rem;
+        color: var(--subtext);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+      .debug-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.9rem;
+      }
+      .debug-table th {
+        text-align: left;
+        padding: 6px 8px;
+        border-bottom: 2px solid var(--line);
+        color: var(--subtext);
+        font-weight: 600;
+      }
+      .debug-table td {
+        padding: 6px 8px;
+        border-bottom: 1px solid var(--line);
+      }
+      .debug-table tr:last-child td { border-bottom: 0; }
+
+      .ingest-detail-row {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        align-items: center;
+        margin-top: 4px;
+      }
     </style>
   </head>
   <body>
@@ -214,6 +329,7 @@
           <button class="tab-btn active" data-tab="logs">Logs</button>
           <button class="tab-btn" data-tab="ingest">Ingest</button>
           <button class="tab-btn" data-tab="detect">Detect</button>
+          <button class="tab-btn" data-tab="patterns">Patterns</button>
           <button class="tab-btn" data-tab="reports">Reports</button>
           <button class="tab-btn" data-tab="status">Status</button>
         </nav>
@@ -222,6 +338,7 @@
       <section id="logs" class="tab active" aria-live="polite"></section>
       <section id="ingest" class="tab"></section>
       <section id="detect" class="tab"></section>
+      <section id="patterns" class="tab"></section>
       <section id="reports" class="tab"></section>
       <section id="status" class="tab"></section>
     </main>
@@ -252,8 +369,33 @@
       const logsEl = document.getElementById("logs");
       const ingestEl = document.getElementById("ingest");
       const detectEl = document.getElementById("detect");
+      const patternsEl = document.getElementById("patterns");
       const reportsEl = document.getElementById("reports");
       const statusEl = document.getElementById("status");
+
+      const extractionBadge = (method) => {
+        const cls = `badge badge-${method || 'fallback'}`;
+        return `<span class="${cls}">${escapeHtml(method || 'rss')}</span>`;
+      };
+
+      const statusBadge = (status) => {
+        const cls = `badge badge-${status || 'pending'}`;
+        return `<span class="${cls}">${escapeHtml(status || 'pending')}</span>`;
+      };
+
+      const noveltyBadge = (score) => {
+        if (score == null) return '<span class="badge badge-fallback">no novelty data</span>';
+        let cls = 'badge-novelty-mid';
+        let label = `${(score * 100).toFixed(0)}%`;
+        if (score >= 0.7) cls = 'badge-novelty-high';
+        else if (score < 0.3) cls = 'badge-novelty-low';
+        return `<span class="badge ${cls}">novelty ${label}</span>`;
+      };
+
+      const formatNumber = (n) => {
+        if (n == null) return "—";
+        return Number(n).toLocaleString();
+      };
 
       const renderLogs = (items) => {
         logsEl.innerHTML = "";
@@ -279,9 +421,27 @@
 
         items.forEach((item) => {
           const hasUrl = Boolean(item.url);
+          const detailParts = [];
+          if (item.author) detailParts.push(`by ${escapeHtml(item.author)}`);
+          if (item.sitename) detailParts.push(escapeHtml(item.sitename));
+          if (item.publish_date) detailParts.push(`published ${item.publish_date}`);
+          if (item.content_length) detailParts.push(`${formatNumber(item.content_length)} chars`);
+          const detailLine = detailParts.length ? detailParts.join(' · ') : '';
+
           ingestEl.insertAdjacentHTML(
             "beforeend",
-            `<a class="list-item" href="${hasUrl ? item.url : "#"}" ${hasUrl ? `target="_blank" rel="noreferrer"` : ""}><div><h2 class="item-title">${safeText(item.title, "Untitled")}</h2><p class="item-sub">${truncate(safeText(item.description, ""))}</p><p class="item-meta">${safeText(item.source_type, "unknown")}</p></div><span class="item-time">${formatIsoTime(item.created_at)}</span></a>`
+            `<a class="list-item" href="${hasUrl ? item.url : "#"}" ${hasUrl ? `target="_blank" rel="noreferrer"` : ""}>` +
+            `<div>` +
+            `<h2 class="item-title">${safeText(item.title, "Untitled")}</h2>` +
+            `<p class="item-sub">${truncate(safeText(item.description, ""))}</p>` +
+            `<div class="ingest-detail-row">` +
+            `<span class="badge badge-${item.source_type === 'youtube' ? 'youtube' : 'rss'}">${escapeHtml(item.source_type || 'unknown')}</span>` +
+            extractionBadge(item.extraction_method) +
+            (detailLine ? `<span style="color:var(--subtext);font-size:0.85rem">${detailLine}</span>` : '') +
+            `</div>` +
+            `</div>` +
+            `<span class="item-time">${formatIsoTime(item.created_at)}</span>` +
+            `</a>`
           );
         });
       };
@@ -323,14 +483,44 @@
         items.forEach((item, index) => {
           const sources = Array.isArray(item.sources) ? item.sources : [];
           const sourcesHtml = sources.length
-            ? `<li><strong>Supporting sources</strong><ul class="sources-list">${sources
+            ? `<li><strong>Supporting sources (${sources.length})</strong><ul class="sources-list">${sources
                 .map((source) => `<li>${source.url ? `<a href="${escapeHtml(source.url)}" target="_blank" rel="noreferrer">${escapeHtml(safeText(source.title, "Untitled source"))}</a>` : escapeHtml(safeText(source.title, "Untitled source"))}</li>`)
                 .join("")}</ul></li>`
             : "<li><strong>Supporting sources</strong>: none linked by detection model yet.</li>";
 
+          // Score breakdown
+          const feedbackAdj = item.feedback_adjustment || 0;
+          const feedbackClass = feedbackAdj > 0 ? 'positive' : feedbackAdj < 0 ? 'negative' : '';
+          const noveltyVal = item.novelty_score;
+          const noveltyAdj = noveltyVal != null ? Math.round((noveltyVal - 0.5) * 30) : 0;
+          const noveltyClass = noveltyAdj > 0 ? 'positive' : noveltyAdj < 0 ? 'negative' : '';
+
           detectEl.insertAdjacentHTML(
             "beforeend",
-            `<article class="trend" data-trend-id="${item.id}"><h3><span class="rank">#${index + 1}</span>${escapeHtml(safeText(item.trend, "Untitled trend"))}</h3><ul class="source-thread"><li>Score: ${safeText(item.score, "n/a")} (base ${safeText(item.base_score, "n/a")}, feedback ${safeText(item.feedback_adjustment, 0)})</li><li>Status: ${escapeHtml(safeText(item.status, "unknown"))}</li><li>Detected: ${formatIsoTime(item.detected_at)}</li>${item.reasoning ? `<li>${escapeHtml(truncate(item.reasoning))}</li>` : ""}${sourcesHtml}</ul><div class="feedback-row"><button class="feedback-btn" data-feedback="important">Important</button><button class="feedback-btn" data-feedback="not_important">Not important</button></div><p class="feedback-note">Your feedback influences future detect scoring.</p></article>`
+            `<article class="trend" data-trend-id="${item.id}">` +
+            `<h3><span class="rank">#${index + 1}</span>${escapeHtml(safeText(item.trend, "Untitled trend"))}</h3>` +
+            `<div class="score-breakdown">` +
+            `<span class="score-total">${safeText(item.score, "—")}</span>` +
+            `<span class="score-part">base: ${safeText(item.base_score, "—")}</span>` +
+            (feedbackAdj !== 0 ? `<span class="score-part ${feedbackClass}">feedback: ${feedbackAdj > 0 ? '+' : ''}${feedbackAdj}</span>` : '') +
+            (noveltyVal != null ? `<span class="score-part ${noveltyClass}">novelty: ${noveltyAdj > 0 ? '+' : ''}${noveltyAdj}</span>` : '') +
+            `</div>` +
+            `<div style="margin:6px 0;display:flex;gap:8px;flex-wrap:wrap">` +
+            statusBadge(item.status) +
+            noveltyBadge(item.novelty_score) +
+            (item.source_diversity ? `<span class="badge badge-rss">${item.source_diversity} sources</span>` : '') +
+            `</div>` +
+            `<ul class="source-thread">` +
+            `<li>Detected: ${formatIsoTime(item.detected_at)}</li>` +
+            (item.reasoning ? `<li>${escapeHtml(truncate(item.reasoning))}</li>` : '') +
+            sourcesHtml +
+            `</ul>` +
+            `<div class="feedback-row">` +
+            `<button class="feedback-btn" data-feedback="important">Important</button>` +
+            `<button class="feedback-btn" data-feedback="not_important">Not important</button>` +
+            `</div>` +
+            `<p class="feedback-note">Your feedback influences future detect scoring.</p>` +
+            `</article>`
           );
         });
 
@@ -339,6 +529,41 @@
             const article = button.closest(".trend");
             submitTrendFeedback(article?.dataset.trendId, button.dataset.feedback, button);
           });
+        });
+      };
+
+      const renderPatterns = (items) => {
+        patternsEl.innerHTML = "";
+        if (!items.length) {
+          renderEmpty(patternsEl, "No tactical patterns yet", "Patterns are extracted during ingest from tactically-rich chunks.");
+          return;
+        }
+
+        patternsEl.insertAdjacentHTML("beforeend",
+          `<p style="color:var(--subtext);margin:8px 0 16px;font-size:0.9rem">` +
+          `${items.length} most recent tactical patterns (actor → action → zone/phase) extracted from ingested articles.</p>`
+        );
+
+        items.forEach((item) => {
+          const zones = (item.zones || []).map(z => escapeHtml(z)).join(', ');
+          patternsEl.insertAdjacentHTML("beforeend",
+            `<article class="pattern-card">` +
+            `<div class="pattern-header">` +
+            `<span class="pattern-actor">${escapeHtml(item.actor || '?')}</span>` +
+            `<span style="color:var(--subtext)">→</span>` +
+            `<span class="pattern-action">${escapeHtml(item.action || '?')}</span>` +
+            (zones ? `<span style="color:var(--subtext)">in</span><span>${zones}</span>` : '') +
+            (item.phase ? `<span style="color:var(--subtext)">during</span><span>${escapeHtml(item.phase)}</span>` : '') +
+            `</div>` +
+            `<div class="pattern-meta">` +
+            (item.source_url
+              ? `<a href="${escapeHtml(item.source_url)}" target="_blank" rel="noreferrer">${escapeHtml(item.source_title)}</a>`
+              : escapeHtml(item.source_title)) +
+            ` · ${formatIsoTime(item.created_at)}` +
+            `</div>` +
+            (item.context ? `<div class="pattern-context">"${escapeHtml(truncate(item.context, 200))}"</div>` : '') +
+            `</article>`
+          );
         });
       };
 
@@ -351,9 +576,24 @@
 
         items.forEach((report) => {
           const hasUrl = Boolean(report.url);
+          const meta = report.metadata || {};
+          const metaParts = [];
+          if (meta.complexity) metaParts.push(`complexity: ${meta.complexity}`);
+          if (meta.total_chunks) metaParts.push(`${meta.total_chunks} chunks`);
+          if (meta.research_rounds) metaParts.push(`${meta.research_rounds} rounds`);
+          if (meta.angles && meta.angles.length) metaParts.push(`${meta.angles.length} angles`);
+          const metaLine = metaParts.join(' · ');
+
           reportsEl.insertAdjacentHTML(
             "beforeend",
-            `<a class="list-item" href="${hasUrl ? report.url : "#"}" ${hasUrl ? `target="_blank" rel="noreferrer"` : ""}><div><h2 class="item-title">${safeText(report.title, "Untitled report")}</h2><p class="item-sub">${truncate(safeText(report.description, ""))}</p><p class="item-meta">${formatIsoTime(report.created_at)}</p></div><span class="item-time">${hasUrl ? "↗" : "•"}</span></a>`
+            `<a class="list-item" href="${hasUrl ? report.url : "#"}" ${hasUrl ? `target="_blank" rel="noreferrer"` : ""}>` +
+            `<div>` +
+            `<h2 class="item-title">${safeText(report.title, "Untitled report")}</h2>` +
+            `<p class="item-sub">${truncate(safeText(report.description, ""))}</p>` +
+            (metaLine ? `<p class="item-meta">${escapeHtml(metaLine)}</p>` : '') +
+            `</div>` +
+            `<span class="item-time">${formatIsoTime(report.created_at)}</span>` +
+            `</a>`
           );
         });
       };
@@ -423,7 +663,56 @@
         });
       };
 
-      const renderStatus = (items) => {
+      const renderDebugSection = (debug) => {
+        if (!debug) return '';
+
+        let html = '<div class="debug-section"><h2>Pipeline Debug</h2>';
+
+        // Counts overview
+        if (debug.counts) {
+          html += '<table class="debug-table"><thead><tr><th>Store</th><th>Count</th></tr></thead><tbody>';
+          for (const [key, val] of Object.entries(debug.counts)) {
+            html += `<tr><td>${escapeHtml(key.replace(/_/g, ' '))}</td><td>${formatNumber(val)}</td></tr>`;
+          }
+          html += '</tbody></table>';
+        }
+
+        // Extraction method breakdown
+        if (debug.extraction_breakdown && Object.keys(debug.extraction_breakdown).length) {
+          html += '<h3 style="margin:16px 0 8px;font-size:0.95rem;color:var(--subtext)">Extraction Methods</h3>';
+          html += '<table class="debug-table"><thead><tr><th>Method</th><th>Sources</th><th>Avg Content Length</th></tr></thead><tbody>';
+          for (const [method, count] of Object.entries(debug.extraction_breakdown)) {
+            const avgLen = debug.avg_content_length?.[method];
+            html += `<tr><td>${extractionBadge(method)}</td><td>${formatNumber(count)}</td><td>${avgLen ? formatNumber(avgLen) + ' chars' : '—'}</td></tr>`;
+          }
+          html += '</tbody></table>';
+        }
+
+        // Source type breakdown
+        if (debug.source_type_breakdown && Object.keys(debug.source_type_breakdown).length) {
+          html += '<h3 style="margin:16px 0 8px;font-size:0.95rem;color:var(--subtext)">Source Types</h3>';
+          html += '<table class="debug-table"><thead><tr><th>Type</th><th>Count</th></tr></thead><tbody>';
+          for (const [type, count] of Object.entries(debug.source_type_breakdown)) {
+            html += `<tr><td>${escapeHtml(type)}</td><td>${formatNumber(count)}</td></tr>`;
+          }
+          html += '</tbody></table>';
+        }
+
+        // Pipeline state
+        if (debug.pipeline_state && Object.keys(debug.pipeline_state).length) {
+          html += '<h3 style="margin:16px 0 8px;font-size:0.95rem;color:var(--subtext)">Pipeline State</h3>';
+          html += '<table class="debug-table"><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>';
+          for (const [key, val] of Object.entries(debug.pipeline_state)) {
+            html += `<tr><td style="font-family:monospace;font-size:0.85rem">${escapeHtml(key)}</td><td>${escapeHtml(val)}</td></tr>`;
+          }
+          html += '</tbody></table>';
+        }
+
+        html += '</div>';
+        return html;
+      };
+
+      const renderStatus = (items, debug) => {
         const scheduleCards = [
           { key: "ingest", label: "Next ingest" },
           { key: "detect", label: "Next detect" },
@@ -444,7 +733,7 @@
             (entry) =>
               `<section class="status-card"><p class="status-label">${entry.label}</p><p class="status-value" data-next-time="${entry.key}">—</p><p class="status-subvalue" data-next-countdown="${entry.key}">Countdown: —</p></section>`
           )
-          .join("")}${runtimeCards}</div>`;
+          .join("")}${runtimeCards}</div>${renderDebugSection(debug)}`;
 
         renderScheduleCards();
         if (statusCountdownTimer) {
@@ -465,8 +754,9 @@
           renderLogs(payload.logs || []);
           renderIngestItems(payload.ingest || []);
           renderDetect(payload.detect || []);
+          renderPatterns(payload.patterns || []);
           renderReports(payload.reports || []);
-          renderStatus(payload.status || []);
+          renderStatus(payload.status || [], payload.debug || null);
 
           if (payload.warning) {
             logsEl.insertAdjacentHTML(
@@ -478,6 +768,7 @@
           renderEmpty(logsEl, "Unable to load logs", error.message);
           renderEmpty(ingestEl, "Unable to load ingested items", error.message);
           renderEmpty(detectEl, "Unable to load detected trends", error.message);
+          renderEmpty(patternsEl, "Unable to load patterns", error.message);
           renderEmpty(reportsEl, "Unable to load reports", error.message);
           renderEmpty(statusEl, "Unable to load status", error.message);
         }
