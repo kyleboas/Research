@@ -618,11 +618,24 @@ def _detect_trends_llm_only(conn, past) -> tuple[list[dict], bool]:
         return [], False
 
     source_catalog: dict[str, list[dict]] = {}
+    normalized_catalog: dict[str, list[dict]] = {}
+
+    def _normalize_title(value: str) -> str:
+        return " ".join("".join(ch.lower() if ch.isalnum() else " " for ch in value).split())
+
     summaries = []
     for source_id, title, url, content in recent:
         source_title = (title or "Untitled source").strip()
+        normalized_title = _normalize_title(source_title)
         summaries.append(f"- {source_title}: {content}...")
         source_catalog.setdefault(source_title, []).append(
+            {
+                "source_id": source_id,
+                "title": source_title,
+                "url": url or "",
+            }
+        )
+        normalized_catalog.setdefault(normalized_title, []).append(
             {
                 "source_id": source_id,
                 "title": source_title,
@@ -655,7 +668,16 @@ def _detect_trends_llm_only(conn, past) -> tuple[list[dict], bool]:
 
             matched_sources = []
             for title in c.get("source_titles") or []:
-                matched_sources.extend(source_catalog.get(str(title).strip(), []))
+                query_title = str(title).strip()
+                query_normalized = _normalize_title(query_title)
+
+                matched_sources.extend(source_catalog.get(query_title, []))
+                matched_sources.extend(normalized_catalog.get(query_normalized, []))
+
+                if query_normalized:
+                    for known_normalized, known_sources in normalized_catalog.items():
+                        if query_normalized in known_normalized or known_normalized in query_normalized:
+                            matched_sources.extend(known_sources)
 
             deduped = []
             seen_source_ids = set()
