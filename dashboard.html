@@ -189,124 +189,133 @@
       const truncate = (text, length = 255) =>
         text.length > length ? `${text.slice(0, length)}…` : text;
 
-      const logs = [
-        { event: "Trend ranking refreshed", detail: "Detect tab recalculated scores for 84 sources.", time: "19:21" },
-        { event: "Ingest completed", detail: "17 feed items normalized and saved.", time: "19:18" },
-        { event: "Cron started", detail: "Pipeline run #2487 kicked off.", time: "19:15" },
-      ];
+      const safeText = (value, fallback = "") => (value == null || value === "" ? fallback : String(value));
 
+      const formatIsoTime = (value) => {
+        if (!value) return "—";
+        const dt = new Date(value);
+        if (Number.isNaN(dt.getTime())) return value;
+        return dt.toLocaleString();
+      };
 
-      const trends = [
-        {
-          name: "Premier League midfield role compression",
-          sources: ["The Athletic analysis", "Guardian tactical desk", "Club press conference transcripts"],
-        },
-        {
-          name: "Late-game set-piece variance",
-          sources: ["Opta blog", "BBC Match of the Day notes", "Independent match reports"],
-        },
-      ];
-
-      const reports = [
-        {
-          title: "Weekend Tactical Recap",
-          date: "2026-03-07",
-          description:
-            "Cross-league review of tactical trends observed in top-flight matches, including the rise in asymmetric fullback structures and how it changed pressing triggers.",
-          url: "https://example.com/reports/weekend-tactical-recap",
-        },
-        {
-          title: "Transfer Sentiment Tracker",
-          date: "2026-03-06",
-          description:
-            "Coverage intensity and sentiment signal shifts around top transfer targets, with source reliability weighting and conflict detection in rumor clusters.",
-          url: "https://example.com/reports/transfer-sentiment-tracker",
-        },
-      ];
-
-      const status = [
-        { label: "Workflow live", value: "Yes" },
-        { label: "Next cron job", value: "2026-03-07 19:30 UTC" },
-        { label: "Last run duration", value: "2m 11s" },
-        { label: "Database", value: "Connected" },
-      ];
+      const renderEmpty = (container, title, detail = "") => {
+        container.innerHTML = `<article class="list-item"><div><h2 class="item-title">${title}</h2><p class="item-sub">${detail}</p></div><span class="item-time">—</span></article>`;
+      };
 
       const logsEl = document.getElementById("logs");
-      logs
-        .slice()
-        .sort((a, b) => b.time.localeCompare(a.time))
-        .forEach((item) => {
-          logsEl.insertAdjacentHTML(
-            "beforeend",
-            `<article class="list-item"><div><h2 class="item-title">${item.event}</h2><p class="item-sub">${item.detail}</p></div><span class="item-time">${item.time}</span></article>`
-          );
-        });
-
       const ingestEl = document.getElementById("ingest");
+      const detectEl = document.getElementById("detect");
+      const reportsEl = document.getElementById("reports");
+      const statusEl = document.getElementById("status");
 
-      const renderIngestItems = (items) => {
-        ingestEl.innerHTML = "";
-
+      const renderLogs = (items) => {
+        logsEl.innerHTML = "";
         if (!items.length) {
-          ingestEl.insertAdjacentHTML(
-            "beforeend",
-            `<article class="list-item"><div><h2 class="item-title">No ingested items yet</h2><p class="item-sub">Run ingest to populate this tab.</p></div><span class="item-time">—</span></article>`
-          );
+          renderEmpty(logsEl, "No workflow events yet", "Run ingest/detect/report steps to populate logs.");
           return;
         }
 
         items.forEach((item) => {
-          const linkTarget = item.url || "#";
-          const arrow = item.url ? "↗" : "•";
-          ingestEl.insertAdjacentHTML(
+          logsEl.insertAdjacentHTML(
             "beforeend",
-            `<a class="list-item" href="${linkTarget}" ${item.url ? `target="_blank" rel="noreferrer"` : ""}><div><h2 class="item-title">${item.title}</h2><p class="item-sub">${truncate(item.description || "")}</p><p class="item-meta">${item.source_type || "Unknown source"}</p></div><span class="item-time">${arrow}</span></a>`
+            `<article class="list-item"><div><h2 class="item-title">${safeText(item.event, "Event")}</h2><p class="item-sub">${truncate(safeText(item.detail, ""))}</p></div><span class="item-time">${formatIsoTime(item.time)}</span></article>`
           );
         });
       };
 
-      const loadIngestItems = async () => {
+      const renderIngestItems = (items) => {
+        ingestEl.innerHTML = "";
+        if (!items.length) {
+          renderEmpty(ingestEl, "No ingested items yet", "Run ingest to populate this tab.");
+          return;
+        }
+
+        items.forEach((item) => {
+          const hasUrl = Boolean(item.url);
+          ingestEl.insertAdjacentHTML(
+            "beforeend",
+            `<a class="list-item" href="${hasUrl ? item.url : "#"}" ${hasUrl ? `target="_blank" rel="noreferrer"` : ""}><div><h2 class="item-title">${safeText(item.title, "Untitled")}</h2><p class="item-sub">${truncate(safeText(item.description, ""))}</p><p class="item-meta">${safeText(item.source_type, "unknown")}</p></div><span class="item-time">${formatIsoTime(item.created_at)}</span></a>`
+          );
+        });
+      };
+
+      const renderDetect = (items) => {
+        detectEl.innerHTML = "";
+        if (!items.length) {
+          renderEmpty(detectEl, "No detected trends yet", "Run detect to populate this tab.");
+          return;
+        }
+
+        items.forEach((item, index) => {
+          detectEl.insertAdjacentHTML(
+            "beforeend",
+            `<article class="trend"><h3><span class="rank">#${index + 1}</span>${safeText(item.trend, "Untitled trend")}</h3><ul class="source-thread"><li>Score: ${safeText(item.score, "n/a")}</li><li>Status: ${safeText(item.status, "unknown")}</li><li>Detected: ${formatIsoTime(item.detected_at)}</li>${item.reasoning ? `<li>${truncate(item.reasoning)}</li>` : ""}</ul></article>`
+          );
+        });
+      };
+
+      const renderReports = (items) => {
+        reportsEl.innerHTML = "";
+        if (!items.length) {
+          renderEmpty(reportsEl, "No reports yet", "Run report generation to populate this tab.");
+          return;
+        }
+
+        items.forEach((report) => {
+          const hasUrl = Boolean(report.url);
+          reportsEl.insertAdjacentHTML(
+            "beforeend",
+            `<a class="list-item" href="${hasUrl ? report.url : "#"}" ${hasUrl ? `target="_blank" rel="noreferrer"` : ""}><div><h2 class="item-title">${safeText(report.title, "Untitled report")}</h2><p class="item-sub">${truncate(safeText(report.description, ""))}</p><p class="item-meta">${formatIsoTime(report.created_at)}</p></div><span class="item-time">${hasUrl ? "↗" : "•"}</span></a>`
+          );
+        });
+      };
+
+      const renderStatus = (items) => {
+        if (!items.length) {
+          statusEl.innerHTML = "";
+          renderEmpty(statusEl, "No status available", "No runtime status data was returned.");
+          return;
+        }
+
+        statusEl.innerHTML = `<div class="status-grid">${items
+          .map(
+            (entry) =>
+              `<section class="status-card"><p class="status-label">${safeText(entry.label, "Unknown")}</p><p class="status-value">${safeText(entry.value, "Unknown")}</p></section>`
+          )
+          .join("")}</div>`;
+      };
+
+      const loadDashboard = async () => {
         try {
-          const response = await fetch("/api/ingest");
+          const response = await fetch("/api/dashboard");
           const payload = await response.json();
 
           if (!response.ok) {
-            throw new Error(payload.warning || "Failed to fetch ingest items");
+            throw new Error(payload.warning || "Failed to load dashboard data");
           }
 
-          renderIngestItems(payload.items || []);
+          renderLogs(payload.logs || []);
+          renderIngestItems(payload.ingest || []);
+          renderDetect(payload.detect || []);
+          renderReports(payload.reports || []);
+          renderStatus(payload.status || []);
+
+          if (payload.warning) {
+            logsEl.insertAdjacentHTML(
+              "afterbegin",
+              `<article class="list-item"><div><h2 class="item-title">Warning</h2><p class="item-sub">${payload.warning}</p></div><span class="item-time">!</span></article>`
+            );
+          }
         } catch (error) {
-          ingestEl.innerHTML = `<article class="list-item"><div><h2 class="item-title">Unable to load ingested items</h2><p class="item-sub">${error.message}</p></div><span class="item-time">!</span></article>`;
+          renderEmpty(logsEl, "Unable to load logs", error.message);
+          renderEmpty(ingestEl, "Unable to load ingested items", error.message);
+          renderEmpty(detectEl, "Unable to load detected trends", error.message);
+          renderEmpty(reportsEl, "Unable to load reports", error.message);
+          renderEmpty(statusEl, "Unable to load status", error.message);
         }
       };
 
-      loadIngestItems();
-
-      const detectEl = document.getElementById("detect");
-      trends.forEach((trend, index) => {
-        detectEl.insertAdjacentHTML(
-          "beforeend",
-          `<article class="trend"><h3><span class="rank">#${index + 1}</span>${trend.name}</h3><ul class="source-thread">${trend.sources
-            .map((source) => `<li>${source}</li>`)
-            .join("")}</ul></article>`
-        );
-      });
-
-      const reportsEl = document.getElementById("reports");
-      reports.forEach((report) => {
-        reportsEl.insertAdjacentHTML(
-          "beforeend",
-          `<a class="list-item" href="${report.url}" target="_blank" rel="noreferrer"><div><h2 class="item-title">${report.title}</h2><p class="item-sub">${truncate(report.description)}</p><p class="item-meta">${report.date}</p></div><span class="item-time">↗</span></a>`
-        );
-      });
-
-      const statusEl = document.getElementById("status");
-      statusEl.innerHTML = `<div class="status-grid">${status
-        .map(
-          (entry) =>
-            `<section class="status-card"><p class="status-label">${entry.label}</p><p class="status-value">${entry.value}</p></section>`
-        )
-        .join("")}</div>`;
+      loadDashboard();
 
       const tabs = [...document.querySelectorAll(".tab-btn")];
       tabs.forEach((btn) => {
@@ -318,5 +327,6 @@
         });
       });
     </script>
+
   </body>
 </html>
