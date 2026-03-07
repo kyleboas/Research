@@ -36,10 +36,19 @@ CLOUDFLARE_GATEWAY_TOKEN = os.environ["CLOUDFLARE_GATEWAY_TOKEN"]
 _cfg_path = ROOT / "config.json"
 _CFG: dict = json.loads(_cfg_path.read_text()) if _cfg_path.exists() else {}
 
-LEAD_MODEL    = os.environ.get("LEAD_MODEL")    or _CFG.get("lead_model",    "openai/o3")
-MODEL         = os.environ.get("MODEL")         or _CFG.get("model",         "openai/gpt-4o")
+LEAD_MODEL    = os.environ.get("LEAD_MODEL")    or _CFG.get("lead_model",    "deepseek/deepseek-r1")
+MODEL         = os.environ.get("MODEL")         or _CFG.get("model",         "google/gemini-2.5-flash")
 EMBED_MODEL   = os.environ.get("EMBED_MODEL")   or _CFG.get("embed_model",   "openai/text-embedding-3-small")
 SIGNAL_MODEL  = os.environ.get("SIGNAL_MODEL")  or _CFG.get("signal_model",  "workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast")
+
+# ── Per-step model overrides (quality-critical steps use Opus/Sonnet) ─────────
+SYNTHESIS_MODEL = os.environ.get("SYNTHESIS_MODEL") or _CFG.get("synthesis_model", "anthropic/claude-opus-4-6")
+SUMMARY_MODEL   = os.environ.get("SUMMARY_MODEL")  or _CFG.get("summary_model",   "anthropic/claude-sonnet-4-6")
+REVISION_MODEL  = os.environ.get("REVISION_MODEL")  or _CFG.get("revision_model",  "anthropic/claude-opus-4-6")
+CITATION_MODEL  = os.environ.get("CITATION_MODEL")  or _CFG.get("citation_model",  "google/gemini-2.5-flash")
+EVAL_MODEL      = os.environ.get("EVAL_MODEL")      or _CFG.get("eval_model",      "google/gemini-2.5-flash")
+
+BATCH_MODE = _CFG.get("batch_mode", False)
 
 
 def _normalize_cloudflare_base_urls(raw_url: str):
@@ -88,6 +97,8 @@ _chat_base_url, _embed_base_url = _normalize_cloudflare_base_urls(CLOUDFLARE_GAT
 log.info("Cloudflare chat base URL: %s", _chat_base_url)
 if _embed_base_url != _chat_base_url:
     log.info("Cloudflare embeddings base URL: %s", _embed_base_url)
+log.info("Model config: lead=%s eval=%s summary=%s synthesis=%s citation=%s revision=%s batch=%s",
+         LEAD_MODEL, EVAL_MODEL, SUMMARY_MODEL, SYNTHESIS_MODEL, CITATION_MODEL, REVISION_MODEL, BATCH_MODE)
 
 
 def get_chat_client():
@@ -105,6 +116,66 @@ def get_embed_client():
 
 
 CITATION_FMT = "Cite every claim as [S<source_id>:C<chunk_id>]. Never cite IDs not in the provided context."
+
+# ── Static system prompts (extracted for prompt caching) ──────────────────────
+# Anthropic models cache repeated prompt prefixes automatically.
+# By keeping system prompts as constants, identical prefixes across calls
+# hit the cache ($0.50/MTok instead of $5.00/MTok for Opus 4.6).
+
+SYS_OODA_EVAL = (
+    "You are evaluating retrieval sufficiency for a research subagent following "
+    "the OODA loop (Observe-Orient-Decide-Act).\n\n"
+    "OBSERVE: Review the chunks collected so far.\n"
+    "ORIENT: Compare against the research objective — what's covered vs what's missing?\n"
+    "DECIDE: Is evidence sufficient, or do we need another retrieval round?\n\n"
+    "If more retrieval is needed, generate a query that is NARROWER and MORE SPECIFIC "
+    "than previous queries — do not repeat broad searches."
+)
+
+SYS_SUBAGENT = (
+    f"You are a focused research subagent. {CITATION_FMT}\n\n"
+    "Stay strictly within your assigned boundaries. Do not speculate beyond "
+    "what the evidence supports. If evidence is thin, say so explicitly."
+)
+
+SYS_SYNTHESIS = (
+    f"You are a synthesis editor merging multiple subagent research outputs into "
+    f"one coherent, publication-quality research report. {CITATION_FMT}"
+)
+
+SYS_CITATION = (
+    "You are a CitationAgent. Your SOLE job is to verify citations in a research report.\n\n"
+    "For EVERY citation [S<source_id>:C<chunk_id>] in the report:\n"
+    "1. Verify the source_id and chunk_id exist in the provided chunks\n"
+    "2. Verify the cited claim is actually supported by that chunk's content\n"
+    "3. Check for claims that SHOULD have citations but don't\n"
+    "4. Check for fabricated/hallucinated citation IDs\n\n"
+    "You must also verify the Sources section at the end lists accurate titles and URLs."
+)
+
+SYS_REVISION = (
+    f"You are a revision editor producing the final research report. {CITATION_FMT}\n\n"
+    "You have received a citation verification report from the CitationAgent. "
+    "Apply every directive precisely. The final report must have zero citation errors."
+)
+
+SYS_DECOMPOSE = (
+    "You are a LeadResearcher orchestrating a multi-agent deep research system. "
+    "Your job is to decompose the research topic into non-overlapping subagent tasks "
+    "with clear boundaries. Each subagent will run independently with its own context window.\n\n"
+    "EFFORT SCALING RULES:\n"
+    "- Simple fact-finding: 1-2 subagents, max_rounds=2, 3-5 search queries each\n"
+    "- Moderate analysis: 3-4 subagents, max_rounds=3, 3-5 search queries each\n"
+    "- Complex multi-faceted research: 5-7 subagents, max_rounds=5, 4-6 search queries each\n\n"
+    "You MUST assess which complexity level applies and set parameters accordingly."
+)
+
+SYS_SUFFICIENCY = (
+    "You are the LeadResearcher evaluating whether the synthesized research is sufficient "
+    "or whether additional subagent research rounds are needed.\n\n"
+    "Be critical but pragmatic. Only request additional research if there are SPECIFIC, "
+    "ACTIONABLE gaps that more retrieval could realistically fill."
+)
 
 # ══════════════════════════════════════════════
 # Feed parsing (YouTube only)
@@ -401,6 +472,156 @@ def ask_thinking(system, user, budget_tokens=10000, max_tokens=16000):
     )
     return "", resp.choices[0].message.content
 
+
+# ── Batch API helpers (50% cost reduction for non-time-critical steps) ────────
+# When BATCH_MODE is True and ANTHROPIC_API_KEY is set, expensive Anthropic
+# model calls are submitted via the Message Batches API (api.anthropic.com)
+# which charges 50% of standard rates but returns results within 24 hours.
+# Falls back to standard gateway calls when batch API is unavailable.
+
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+_ANTHROPIC_BATCH_URL = "https://api.anthropic.com/v1/messages/batches"
+_ANTHROPIC_MSG_URL = "https://api.anthropic.com/v1/messages"
+
+
+def _is_anthropic_model(model):
+    """Check if a model routes to Anthropic (for batch API eligibility)."""
+    return model and ("anthropic/" in model or "claude" in model.lower())
+
+
+def _anthropic_model_id(model):
+    """Strip provider prefix for direct Anthropic API calls."""
+    return model.replace("anthropic/", "")
+
+
+def _anthropic_direct(system, user, model, max_tokens=4096):
+    """Call Anthropic Messages API directly (bypassing gateway).
+
+    Used for batch-eligible requests when ANTHROPIC_API_KEY is available.
+    Returns the text response.
+    """
+    payload = json.dumps({
+        "model": _anthropic_model_id(model),
+        "max_tokens": max_tokens,
+        "system": system,
+        "messages": [{"role": "user", "content": user}],
+    }).encode()
+
+    req = Request(_ANTHROPIC_MSG_URL, data=payload, method="POST")
+    req.add_header("x-api-key", ANTHROPIC_API_KEY)
+    req.add_header("anthropic-version", "2023-06-01")
+    req.add_header("content-type", "application/json")
+
+    with urlopen(req, timeout=300) as r:
+        data = json.loads(r.read())
+    return data["content"][0]["text"]
+
+
+def submit_batch(requests):
+    """Submit a batch of Anthropic message requests.
+
+    Args:
+        requests: List of dicts with keys: custom_id, system, user, model, max_tokens
+
+    Returns:
+        batch_id for polling, or None if batch API is unavailable.
+    """
+    if not ANTHROPIC_API_KEY:
+        return None
+
+    batch_requests = []
+    for r in requests:
+        batch_requests.append({
+            "custom_id": r["custom_id"],
+            "params": {
+                "model": _anthropic_model_id(r["model"]),
+                "max_tokens": r.get("max_tokens", 4096),
+                "system": r["system"],
+                "messages": [{"role": "user", "content": r["user"]}],
+            },
+        })
+
+    payload = json.dumps({"requests": batch_requests}).encode()
+    req = Request(_ANTHROPIC_BATCH_URL, data=payload, method="POST")
+    req.add_header("x-api-key", ANTHROPIC_API_KEY)
+    req.add_header("anthropic-version", "2023-06-01")
+    req.add_header("content-type", "application/json")
+
+    with urlopen(req, timeout=60) as r:
+        data = json.loads(r.read())
+    batch_id = data["id"]
+    log.info("Batch submitted: %s (%d requests)", batch_id, len(requests))
+    return batch_id
+
+
+def poll_batch(batch_id, poll_interval=30, timeout=3600):
+    """Poll for batch completion and return results keyed by custom_id.
+
+    Returns:
+        Dict mapping custom_id -> response text
+    """
+    url = f"{_ANTHROPIC_BATCH_URL}/{batch_id}"
+    deadline = time.time() + timeout
+
+    while time.time() < deadline:
+        req = Request(url)
+        req.add_header("x-api-key", ANTHROPIC_API_KEY)
+        req.add_header("anthropic-version", "2023-06-01")
+
+        with urlopen(req, timeout=30) as r:
+            data = json.loads(r.read())
+
+        status = data.get("processing_status", "")
+        if status == "ended":
+            break
+        log.info("Batch %s: %s", batch_id, status)
+        time.sleep(poll_interval)
+    else:
+        log.warning("Batch %s timed out after %ds", batch_id, timeout)
+        return {}
+
+    # Fetch results
+    results_url = data.get("results_url", "")
+    if not results_url:
+        log.warning("Batch %s: no results_url in response", batch_id)
+        return {}
+
+    req = Request(results_url)
+    req.add_header("x-api-key", ANTHROPIC_API_KEY)
+    req.add_header("anthropic-version", "2023-06-01")
+
+    with urlopen(req, timeout=60) as r:
+        lines = r.read().decode().strip().split("\n")
+
+    results = {}
+    for line in lines:
+        if not line.strip():
+            continue
+        item = json.loads(line)
+        cid = item.get("custom_id", "")
+        if item.get("result", {}).get("type") == "succeeded":
+            msg = item["result"]["message"]
+            results[cid] = msg["content"][0]["text"]
+        else:
+            log.warning("Batch item %s failed: %s", cid, item.get("result", {}).get("error"))
+    return results
+
+
+def ask_or_batch(system, user, model=None, max_tokens=4096):
+    """Like ask(), but uses direct Anthropic API when batch_mode is off but
+    ANTHROPIC_API_KEY is set — this enables prompt caching benefits.
+
+    For actual batch submission, use submit_batch() + poll_batch() directly.
+    """
+    model = model or MODEL
+    if ANTHROPIC_API_KEY and _is_anthropic_model(model):
+        try:
+            return _anthropic_direct(system, user, model, max_tokens)
+        except Exception as e:
+            log.warning("Direct Anthropic call failed, falling back to gateway: %s", e)
+    return ask(system, user, model=model, max_tokens=max_tokens)
+
+
 def parse_json(text):
     """Extract JSON from a text response.
 
@@ -614,14 +835,7 @@ def decompose_topic(trend):
     and calibrates the number of subagents and retrieval depth accordingly.
     """
     thinking, response = ask_thinking(
-        "You are a LeadResearcher orchestrating a multi-agent deep research system. "
-        "Your job is to decompose the research topic into non-overlapping subagent tasks "
-        "with clear boundaries. Each subagent will run independently with its own context window.\n\n"
-        "EFFORT SCALING RULES:\n"
-        "- Simple fact-finding: 1-2 subagents, max_rounds=2, 3-5 search queries each\n"
-        "- Moderate analysis: 3-4 subagents, max_rounds=3, 3-5 search queries each\n"
-        "- Complex multi-faceted research: 5-7 subagents, max_rounds=5, 4-6 search queries each\n\n"
-        "You MUST assess which complexity level applies and set parameters accordingly.",
+        SYS_DECOMPOSE,
 
         f"Research topic: {trend}\n\n"
         "Think step by step:\n"
@@ -663,7 +877,7 @@ def decompose_topic(trend):
 # Step 2: Subagent — OODA retrieval loop (broad-to-narrow)
 # ══════════════════════════════════════════════
 
-def research_angle(conn, trend, task):
+def research_angle(conn, trend, task, defer_summary=False):
     """Subagent with OODA loop: Observe → Orient → Decide → Act.
 
     Mirrors Anthropic's subagent pattern:
@@ -672,6 +886,9 @@ def research_angle(conn, trend, task):
     - Decide: generate a narrower, more targeted query
     - Act: retrieve again with refined query
     - Repeat until sufficient or max rounds reached
+
+    If defer_summary=True, skips the LLM summary call and returns chunks only
+    (for batch mode where summaries are submitted as a batch).
     """
     angle = task.get("angle", "general")
     objective = task.get("objective", "")
@@ -695,13 +912,7 @@ def research_angle(conn, trend, task):
         chunk_json = chunks_to_context(list(all_chunks.values()))
         try:
             eval_text = ask(
-                "You are evaluating retrieval sufficiency for a research subagent following "
-                "the OODA loop (Observe-Orient-Decide-Act).\n\n"
-                "OBSERVE: Review the chunks collected so far.\n"
-                "ORIENT: Compare against the research objective — what's covered vs what's missing?\n"
-                "DECIDE: Is evidence sufficient, or do we need another retrieval round?\n\n"
-                "If more retrieval is needed, generate a query that is NARROWER and MORE SPECIFIC "
-                "than previous queries — do not repeat broad searches.",
+                SYS_OODA_EVAL,
 
                 f"Angle: {angle}\n"
                 f"Objective: {objective}\n"
@@ -709,7 +920,8 @@ def research_angle(conn, trend, task):
                 f"Previous queries: {json.dumps(queries[:round_num + 1])}\n\n"
                 f"Chunks collected ({len(all_chunks)} total):\n{chunk_json}\n\n"
                 'Return JSON: {{"sufficient": true/false, "coverage_pct": 0-100, '
-                '"gaps": ["specific gap 1", ...], "next_query": "narrower query" or null}}'
+                '"gaps": ["specific gap 1", ...], "next_query": "narrower query" or null}}',
+                model=EVAL_MODEL,
             )
             eval_result = parse_json(eval_text)
         except Exception:
@@ -727,16 +939,39 @@ def research_angle(conn, trend, task):
         if next_q:
             queries.append(next_q)
 
+    last_coverage = eval_result.get("coverage_pct", 50) if 'eval_result' in dir() else 50
+
     if not all_chunks:
         return {"angle": angle, "summary": f"No evidence found for: {angle}",
                 "chunks": [], "coverage": 0}
 
-    # Write grounded summary for this angle
     chunk_json = chunks_to_context(list(all_chunks.values()))
-    summary = ask(
-        f"You are a focused research subagent. {CITATION_FMT}\n\n"
-        "Stay strictly within your assigned boundaries. Do not speculate beyond "
-        "what the evidence supports. If evidence is thin, say so explicitly.",
+
+    if defer_summary:
+        # Return without summarizing — caller will batch the summary calls
+        log.info("Subagent '%s' retrieval done (deferred summary): %d chunks, %d rounds",
+                 angle, len(all_chunks), round_num + 1)
+        return {"angle": angle, "summary": None, "chunks": list(all_chunks.values()),
+                "coverage": last_coverage,
+                "_summary_request": {
+                    "system": SYS_SUBAGENT,
+                    "user": (
+                        f"Angle: {angle}\n"
+                        f"Objective: {objective}\n"
+                        f"Out of scope: {boundaries}\n\n"
+                        f"Evidence chunks:\n{chunk_json}\n\n"
+                        "Write a thorough, evidence-grounded analysis for this angle:\n"
+                        "- Lead with the strongest finding\n"
+                        "- Use inline citations [S<source_id>:C<chunk_id>] on every claim\n"
+                        "- Bold key statistics and figures\n"
+                        "- Note evidence quality and any limitations\n"
+                        "- Flag if evidence was insufficient for any part of the objective"
+                    ),
+                }}
+
+    # Write grounded summary for this angle
+    summary = ask_or_batch(
+        SYS_SUBAGENT,
 
         f"Angle: {angle}\n"
         f"Objective: {objective}\n"
@@ -747,17 +982,28 @@ def research_angle(conn, trend, task):
         "- Use inline citations [S<source_id>:C<chunk_id>] on every claim\n"
         "- Bold key statistics and figures\n"
         "- Note evidence quality and any limitations\n"
-        "- Flag if evidence was insufficient for any part of the objective"
+        "- Flag if evidence was insufficient for any part of the objective",
+        model=SUMMARY_MODEL,
     )
     log.info("Subagent '%s' done: %d chunks, %d rounds", angle, len(all_chunks), round_num + 1)
     return {"angle": angle, "summary": summary, "chunks": list(all_chunks.values()),
-            "coverage": eval_result.get("coverage_pct", 50) if 'eval_result' in dir() else 50}
+            "coverage": last_coverage}
 
 def run_subagents(conn, trend, tasks):
-    """Run subagent research in parallel with bounded concurrency."""
+    """Run subagent research in parallel with bounded concurrency.
+
+    When BATCH_MODE is True and ANTHROPIC_API_KEY is set, subagent summaries
+    are submitted as a single Anthropic Message Batch (50% cost reduction).
+    Retrieval (OODA loop) still runs in parallel via the gateway.
+    """
+    use_batch = BATCH_MODE and ANTHROPIC_API_KEY and _is_anthropic_model(SUMMARY_MODEL)
+
     results = []
     with ThreadPoolExecutor(max_workers=min(len(tasks), 4)) as pool:
-        futures = {pool.submit(research_angle, conn, trend, task): task for task in tasks}
+        futures = {
+            pool.submit(research_angle, conn, trend, task, defer_summary=use_batch): task
+            for task in tasks
+        }
         for future in as_completed(futures):
             try:
                 results.append(future.result())
@@ -766,6 +1012,51 @@ def run_subagents(conn, trend, tasks):
                 log.warning("Subagent '%s' failed: %s", task.get("angle"), e)
                 results.append({"angle": task.get("angle", "?"),
                                 "summary": f"Research failed: {e}", "chunks": [], "coverage": 0})
+
+    if not use_batch:
+        return results
+
+    # Batch all deferred summaries via Anthropic Message Batches API
+    batch_requests = []
+    deferred_indices = []
+    for i, r in enumerate(results):
+        req = r.pop("_summary_request", None)
+        if req and r["summary"] is None:
+            batch_requests.append({
+                "custom_id": f"summary-{i}-{r['angle']}",
+                "system": req["system"],
+                "user": req["user"],
+                "model": SUMMARY_MODEL,
+                "max_tokens": 4096,
+            })
+            deferred_indices.append(i)
+
+    if not batch_requests:
+        return results
+
+    log.info("Submitting %d subagent summaries as Anthropic batch (50%% cost reduction)...",
+             len(batch_requests))
+    batch_id = submit_batch(batch_requests)
+
+    if batch_id:
+        batch_results = poll_batch(batch_id)
+        for req, idx in zip(batch_requests, deferred_indices):
+            cid = req["custom_id"]
+            if cid in batch_results:
+                results[idx]["summary"] = batch_results[cid]
+                log.info("Batch summary received for '%s'", results[idx]["angle"])
+            else:
+                log.warning("Batch summary missing for '%s', falling back to direct call",
+                            results[idx]["angle"])
+                results[idx]["summary"] = ask_or_batch(
+                    req["system"], req["user"], model=SUMMARY_MODEL)
+    else:
+        # Batch submission failed, fall back to direct calls
+        log.warning("Batch submission failed, falling back to direct calls")
+        for req, idx in zip(batch_requests, deferred_indices):
+            results[idx]["summary"] = ask_or_batch(
+                req["system"], req["user"], model=SUMMARY_MODEL)
+
     return results
 
 # ══════════════════════════════════════════════
@@ -792,9 +1083,8 @@ def synthesize(trend, subagent_results):
     weak = [r["angle"] for r in subagent_results if r.get("coverage", 100) < 40]
     failed = [r["angle"] for r in subagent_results if not r["chunks"]]
 
-    draft = ask(
-        f"You are a synthesis editor merging multiple subagent research outputs into "
-        f"one coherent, publication-quality research report. {CITATION_FMT}",
+    draft = ask_or_batch(
+        SYS_SYNTHESIS,
 
         f"Topic: {trend}\n\n"
         f"Subagent summaries:\n{summaries_text}\n\n"
@@ -825,6 +1115,7 @@ def synthesize(trend, subagent_results):
         "- `---` separators between major sections\n"
         "- Flag any speculation explicitly\n"
         "- Acknowledge evidence gaps honestly",
+        model=SYNTHESIS_MODEL,
         max_tokens=12000,
     )
     return draft, chunk_json, all_chunks
@@ -845,10 +1136,7 @@ def evaluate_sufficiency(trend, draft, subagent_results, chunk_json):
     )
 
     thinking, response = ask_thinking(
-        "You are the LeadResearcher evaluating whether the synthesized research is sufficient "
-        "or whether additional subagent research rounds are needed.\n\n"
-        "Be critical but pragmatic. Only request additional research if there are SPECIFIC, "
-        "ACTIONABLE gaps that more retrieval could realistically fill.",
+        SYS_SUFFICIENCY,
 
         f"Topic: {trend}\n\n"
         f"Subagent coverage:\n{coverage_summary}\n\n"
@@ -882,13 +1170,7 @@ def verify_citations(trend, draft, chunk_json):
     documents and the research report to identify specific locations for citations.
     """
     return ask(
-        "You are a CitationAgent. Your SOLE job is to verify citations in a research report.\n\n"
-        "For EVERY citation [S<source_id>:C<chunk_id>] in the report:\n"
-        "1. Verify the source_id and chunk_id exist in the provided chunks\n"
-        "2. Verify the cited claim is actually supported by that chunk's content\n"
-        "3. Check for claims that SHOULD have citations but don't\n"
-        "4. Check for fabricated/hallucinated citation IDs\n\n"
-        "You must also verify the Sources section at the end lists accurate titles and URLs.",
+        SYS_CITATION,
 
         f"Topic: {trend}\n\n"
         f"Available source chunks:\n{chunk_json}\n\n"
@@ -909,6 +1191,7 @@ def verify_citations(trend, draft, chunk_json):
         "Any sources listed that weren't cited, or cited sources not listed.\n\n"
         "## Revision Directives\n"
         "Ordered list of specific changes for the revision editor.",
+        model=CITATION_MODEL,
     )
 
 # ══════════════════════════════════════════════
@@ -917,10 +1200,8 @@ def verify_citations(trend, draft, chunk_json):
 
 def revise(trend, draft, citation_report, chunk_json):
     """Produce the final report incorporating citation verification feedback."""
-    return ask(
-        f"You are a revision editor producing the final research report. {CITATION_FMT}\n\n"
-        "You have received a citation verification report from the CitationAgent. "
-        "Apply every directive precisely. The final report must have zero citation errors.",
+    return ask_or_batch(
+        SYS_REVISION,
 
         f"Topic: {trend}\n\n"
         f"Source chunks:\n{chunk_json}\n\n"
@@ -945,6 +1226,7 @@ def revise(trend, draft, citation_report, chunk_json):
         "8. Explicitly flag remaining speculation with qualifiers like "
         "\"evidence suggests\" or \"it appears that\"\n"
         "9. Use `---` separators between major sections",
+        model=REVISION_MODEL,
         max_tokens=12000,
     )
 
@@ -1008,8 +1290,16 @@ def generate_report(conn, trend):
         "angles": [r["angle"] for r in all_subagent_results],
         "total_chunks": len(all_chunks),
         "research_rounds": research_round + 1,
-        "model": MODEL,
-        "lead_model": LEAD_MODEL,
+        "models": {
+            "lead": LEAD_MODEL,
+            "eval": EVAL_MODEL,
+            "summary": SUMMARY_MODEL,
+            "synthesis": SYNTHESIS_MODEL,
+            "citation": CITATION_MODEL,
+            "revision": REVISION_MODEL,
+            "signal": SIGNAL_MODEL,
+        },
+        "batch_mode": BATCH_MODE,
     })
     with conn.cursor() as cur:
         cur.execute("INSERT INTO reports (title, content, metadata) VALUES (%s, %s, %s::jsonb)",
