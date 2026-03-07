@@ -198,6 +198,12 @@
         font-size: 1.12rem;
         font-weight: 700;
       }
+
+      .status-subvalue {
+        margin: 6px 0 0;
+        color: var(--subtext);
+        font-size: 0.93rem;
+      }
     </style>
   </head>
   <body>
@@ -352,19 +358,99 @@
         });
       };
 
-      const renderStatus = (items) => {
-        if (!items.length) {
-          statusEl.innerHTML = "";
-          renderEmpty(statusEl, "No status available", "No runtime status data was returned.");
-          return;
+      const formatCountdown = (milliseconds) => {
+        const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
+        const hours = Math.floor(totalSeconds / 3600);
+        const minutes = Math.floor((totalSeconds % 3600) / 60);
+        const seconds = totalSeconds % 60;
+
+        if (hours > 0) {
+          return `${hours}h ${minutes}m ${seconds}s`;
+        }
+        return `${minutes}m ${seconds}s`;
+      };
+
+      const getNextRunForSchedule = (name, now = new Date()) => {
+        const next = new Date(now);
+        next.setSeconds(0, 0);
+
+        if (name === "ingest") {
+          next.setMinutes(0);
+          next.setHours(now.getHours() + 1);
+          return next;
         }
 
-        statusEl.innerHTML = `<div class="status-grid">${items
+        if (name === "detect") {
+          const nextBlockHour = Math.ceil((now.getHours() + 1) / 6) * 6;
+          next.setMinutes(0);
+          if (nextBlockHour >= 24) {
+            next.setDate(next.getDate() + 1);
+            next.setHours(nextBlockHour - 24);
+          } else {
+            next.setHours(nextBlockHour);
+          }
+          return next;
+        }
+
+        // report: daily at 01:00
+        next.setHours(1, 0, 0, 0);
+        if (now >= next) {
+          next.setDate(next.getDate() + 1);
+        }
+        return next;
+      };
+
+      let statusCountdownTimer = null;
+
+      const renderScheduleCards = () => {
+        const now = new Date();
+        const schedules = [
+          { key: "ingest", label: "Next ingest" },
+          { key: "detect", label: "Next detect" },
+          { key: "report", label: "Next report" },
+        ];
+
+        schedules.forEach((schedule) => {
+          const nextRun = getNextRunForSchedule(schedule.key, now);
+          const timeEl = statusEl.querySelector(`[data-next-time="${schedule.key}"]`);
+          const countdownEl = statusEl.querySelector(`[data-next-countdown="${schedule.key}"]`);
+          if (timeEl) {
+            timeEl.textContent = formatIsoTime(nextRun.toISOString());
+          }
+          if (countdownEl) {
+            countdownEl.textContent = `Countdown: ${formatCountdown(nextRun - now)}`;
+          }
+        });
+      };
+
+      const renderStatus = (items) => {
+        const scheduleCards = [
+          { key: "ingest", label: "Next ingest" },
+          { key: "detect", label: "Next detect" },
+          { key: "report", label: "Next report" },
+        ];
+
+        const runtimeCards = items.length
+          ? items
           .map(
             (entry) =>
               `<section class="status-card"><p class="status-label">${safeText(entry.label, "Unknown")}</p><p class="status-value">${safeText(entry.value, "Unknown")}</p></section>`
           )
-          .join("")}</div>`;
+          .join("")
+          : `<section class="status-card"><p class="status-label">Runtime status</p><p class="status-value">No status available</p><p class="status-subvalue">No runtime status data was returned.</p></section>`;
+
+        statusEl.innerHTML = `<div class="status-grid">${scheduleCards
+          .map(
+            (entry) =>
+              `<section class="status-card"><p class="status-label">${entry.label}</p><p class="status-value" data-next-time="${entry.key}">—</p><p class="status-subvalue" data-next-countdown="${entry.key}">Countdown: —</p></section>`
+          )
+          .join("")}${runtimeCards}</div>`;
+
+        renderScheduleCards();
+        if (statusCountdownTimer) {
+          clearInterval(statusCountdownTimer);
+        }
+        statusCountdownTimer = setInterval(renderScheduleCards, 1000);
       };
 
       const loadDashboard = async () => {
