@@ -36,24 +36,23 @@ CLOUDFLARE_GATEWAY_TOKEN = os.environ["CLOUDFLARE_GATEWAY_TOKEN"]
 _cfg_path = ROOT / "config.json"
 _CFG: dict = json.loads(_cfg_path.read_text()) if _cfg_path.exists() else {}
 
-LEAD_MODEL  = os.environ.get("LEAD_MODEL")  or _CFG.get("lead_model",  "o3")
-MODEL       = os.environ.get("MODEL")       or _CFG.get("model",       "gpt-4o")
-EMBED_MODEL = os.environ.get("EMBED_MODEL") or _CFG.get("embed_model", "text-embedding-3-small")
+LEAD_MODEL    = os.environ.get("LEAD_MODEL")    or _CFG.get("lead_model",    "openai/o3")
+MODEL         = os.environ.get("MODEL")         or _CFG.get("model",         "openai/gpt-4o")
+EMBED_MODEL   = os.environ.get("EMBED_MODEL")   or _CFG.get("embed_model",   "openai/text-embedding-3-small")
+SIGNAL_MODEL  = os.environ.get("SIGNAL_MODEL")  or _CFG.get("signal_model",  "workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast")
 
 
 def _normalize_cloudflare_base_urls(raw_url: str):
     """Return SDK-safe chat/embeddings base URLs from a Cloudflare Gateway URL.
 
     Supported inputs:
-    - .../openai
-    - .../openai/chat/completions
-    - .../compat/chat/completions
-    - .../compat
+    - .../openai             → kept as-is (OpenAI-only route)
+    - .../openai/chat/completions → trimmed to .../openai
+    - .../compat/chat/completions → trimmed to .../compat
+    - .../compat             → kept as-is (unified route, supports all providers via model prefix)
 
-    All inputs are normalised to use the /openai provider route so that the
-    OpenAI SDK appends /chat/completions and /embeddings to a valid provider
-    path.  Plain prefix + "/v1" is not a valid AI Gateway provider route and
-    produces a 400 Invalid provider response.
+    The /compat endpoint is the unified AI Gateway route. Model names must be
+    prefixed with the provider (e.g. "openai/gpt-4o", "workers-ai/@cf/meta/llama-...").
     """
     base = raw_url.rstrip("/")
 
@@ -65,14 +64,10 @@ def _normalize_cloudflare_base_urls(raw_url: str):
         return base, base
 
     if base.endswith("/compat/chat/completions"):
-        prefix = base[: -len("/compat/chat/completions")]
-        provider = f"{prefix}/openai"
-        return provider, provider
+        return base[: -len("/chat/completions")], base[: -len("/chat/completions")]
 
     if base.endswith("/compat"):
-        prefix = base[: -len("/compat")]
-        provider = f"{prefix}/openai"
-        return provider, provider
+        return base, base
 
     return base, base
 
@@ -521,7 +516,11 @@ def detect_trends(conn) -> tuple[list[dict], bool]:
                      sum(1 for s in signals if s["signal_class"] == "strong"))
 
             # Use LLM to synthesize signals into trend descriptions
-            candidates = describe_signals_with_llm(conn, signals, ask, past_topics=past)
+            candidates = describe_signals_with_llm(
+                conn, signals,
+                lambda sys, usr: ask(sys, usr, model=SIGNAL_MODEL),
+                past_topics=past,
+            )
             if candidates:
                 log.info("BERTrend + LLM produced %d trend candidates", len(candidates))
                 return candidates, False
