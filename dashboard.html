@@ -324,7 +324,7 @@
 
           detectEl.insertAdjacentHTML(
             "beforeend",
-            `<article class="trend" data-trend-id="${item.id}"><h3><span class="rank">#${index + 1}</span>${escapeHtml(safeText(item.trend, "Untitled trend"))}</h3><ul class="source-thread"><li>Score: ${safeText(item.score, "n/a")} (base ${safeText(item.base_score, "n/a")}, feedback ${safeText(item.feedback_adjustment, 0)})</li><li>Status: ${escapeHtml(safeText(item.status, "unknown"))}</li><li>Detected: ${formatIsoTime(item.detected_at)}</li>${item.reasoning ? `<li>${escapeHtml(truncate(item.reasoning))}</li>` : ""}${sourcesHtml}</ul><div class="feedback-row"><button class="feedback-btn" data-feedback="important">Important 👍</button><button class="feedback-btn" data-feedback="not_important">Not important 👎</button></div><p class="feedback-note">Your feedback influences future detect scoring.</p></article>`
+            `<article class="trend" data-trend-id="${item.id}"><h3><span class="rank">#${index + 1}</span>${escapeHtml(safeText(item.trend, "Untitled trend"))}</h3><ul class="source-thread"><li>Score: ${safeText(item.score, "n/a")} (base ${safeText(item.base_score, "n/a")}, feedback ${safeText(item.feedback_adjustment, 0)})</li><li>Status: ${escapeHtml(safeText(item.status, "unknown"))}</li><li>Detected: ${formatIsoTime(item.detected_at)}</li>${item.reasoning ? `<li>${escapeHtml(truncate(item.reasoning))}</li>` : ""}${sourcesHtml}</ul><div class="feedback-row"><button class="feedback-btn" data-feedback="important">Important</button><button class="feedback-btn" data-feedback="not_important">Not important</button></div><p class="feedback-note">Your feedback influences future detect scoring.</p></article>`
           );
         });
 
