@@ -346,13 +346,40 @@ class TopicTracker:
 # Step 5: Classify signals using rolling percentile thresholds
 # ══════════════════════════════════════════════
 
+def _popularity_slope(history, cutoff):
+    """Compute linear regression slope of popularity over time within rolling window.
+
+    Positive slope = growing (emerging signal).
+    Negative slope = declining (fading, reclassify as noise per BERTrend paper).
+    """
+    recent = [(ts, p) for ts, p in history if ts >= cutoff]
+    if len(recent) < 2:
+        return 0.0
+
+    # Convert timestamps to days-since-first for regression
+    t0 = recent[0][0]
+    x = np.array([(ts - t0).total_seconds() / 86400 for ts, _ in recent])
+    y = np.array([p for _, p in recent])
+
+    # Simple linear regression slope: cov(x,y) / var(x)
+    x_mean = x.mean()
+    y_mean = y.mean()
+    var_x = ((x - x_mean) ** 2).sum()
+    if var_x == 0:
+        return 0.0
+    return float(((x - x_mean) * (y - y_mean)).sum() / var_x)
+
+
 def _classify_signals(tracker, rolling_window_days, noise_pct, weak_pct):
     """Classify all tracked topics as noise / weak / strong signals.
 
-    Uses BERTrend's dynamic percentile thresholds:
+    Uses BERTrend's dynamic percentile thresholds + linear regression slope:
     - P10 (noise_pct): below = noise
     - P50 (weak_pct): below = weak, above = strong
-    Computed over a rolling window of recent popularity values.
+    - Negative popularity slope: reclassify as noise (fading topic, not emerging)
+
+    The slope check is critical: it distinguishes genuinely emerging weak signals
+    from previously popular topics that are declining (per BERTrend paper §3.3).
     """
     now = datetime.now(UTC)
     cutoff = now - timedelta(days=rolling_window_days)
@@ -376,11 +403,17 @@ def _classify_signals(tracker, rolling_window_days, noise_pct, weak_pct):
 
     for topic in tracker.topics.values():
         pop = topic["popularity"]
+        slope = _popularity_slope(topic["popularity_history"], cutoff)
 
         if pop < p_noise:
             topic["signal_class"] = "noise"
         elif pop < p_weak:
-            topic["signal_class"] = "weak"
+            # Weak signal — but only if popularity is growing
+            # Negative slope = fading topic, reclassify as noise
+            if slope < 0:
+                topic["signal_class"] = "noise"
+            else:
+                topic["signal_class"] = "weak"
         else:
             topic["signal_class"] = "strong"
 
