@@ -473,11 +473,14 @@ def ask_thinking(system, user, budget_tokens=10000, max_tokens=16000):
     return "", resp.choices[0].message.content
 
 
-# ── Batch API helpers (50% cost reduction for non-time-critical steps) ────────
-# When BATCH_MODE is True and ANTHROPIC_API_KEY is set, expensive Anthropic
-# model calls are submitted via the Message Batches API (api.anthropic.com)
-# which charges 50% of standard rates but returns results within 24 hours.
-# Falls back to standard gateway calls when batch API is unavailable.
+# ── Batch API helpers (50% cost reduction, optional) ─────────────────────────
+# When batch_mode is true in config.json and ANTHROPIC_API_KEY is set,
+# subagent summaries are submitted via Anthropic's Message Batches API
+# (api.anthropic.com) at 50% of standard rates. Results arrive within 24h.
+# Falls back to normal gateway calls when batch API is unavailable.
+#
+# ANTHROPIC_API_KEY is ONLY needed for batch mode. All other calls route
+# through the Cloudflare AI Gateway using CLOUDFLARE_GATEWAY_TOKEN.
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 _ANTHROPIC_BATCH_URL = "https://api.anthropic.com/v1/messages/batches"
@@ -608,17 +611,15 @@ def poll_batch(batch_id, poll_interval=30, timeout=3600):
 
 
 def ask_or_batch(system, user, model=None, max_tokens=4096):
-    """Like ask(), but uses direct Anthropic API when batch_mode is off but
-    ANTHROPIC_API_KEY is set — this enables prompt caching benefits.
+    """Standard ask() routed through the Cloudflare AI Gateway.
 
-    For actual batch submission, use submit_batch() + poll_batch() directly.
+    Prompt caching works automatically — Anthropic caches identical system
+    prompt prefixes on their side regardless of whether the request arrives
+    via gateway or direct API. Static SYS_* constants ensure cache hits.
+
+    For batch submission (50% cost reduction, requires ANTHROPIC_API_KEY),
+    use submit_batch() + poll_batch() directly.
     """
-    model = model or MODEL
-    if ANTHROPIC_API_KEY and _is_anthropic_model(model):
-        try:
-            return _anthropic_direct(system, user, model, max_tokens)
-        except Exception as e:
-            log.warning("Direct Anthropic call failed, falling back to gateway: %s", e)
     return ask(system, user, model=model, max_tokens=max_tokens)
 
 
