@@ -1,7 +1,7 @@
 {
   "lead_model": "deepseek/deepseek-r1",
   "model": "google/gemini-2.5-flash",
-  "embed_model": "text-embedding-3-small",
+  "embed_model": "workers-ai/@cf/baai/bge-m3",
   "signal_model": "workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast",
 
   "synthesis_model": "anthropic/claude-opus-4-6",

@@ -41,7 +41,7 @@ _CFG: dict = json.loads(_cfg_path.read_text()) if _cfg_path.exists() else {}
 
 LEAD_MODEL    = os.environ.get("LEAD_MODEL")    or _CFG.get("lead_model",    "deepseek/deepseek-r1")
 MODEL         = os.environ.get("MODEL")         or _CFG.get("model",         "google/gemini-2.5-flash")
-EMBED_MODEL   = os.environ.get("EMBED_MODEL")   or _CFG.get("embed_model",   "openai/text-embedding-3-small")
+EMBED_MODEL   = os.environ.get("EMBED_MODEL")   or _CFG.get("embed_model",   "workers-ai/@cf/baai/bge-m3")
 SIGNAL_MODEL  = os.environ.get("SIGNAL_MODEL")  or _CFG.get("signal_model",  "workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast")
 
 # ── Per-step model overrides (quality-critical steps use Opus/Sonnet) ─────────
@@ -90,14 +90,39 @@ def _make_client(base_url: str):
     )
 
 
+def _resolve_embed_model(base_url: str, model_name: str) -> str:
+    """Normalize embed model names for Cloudflare AI Gateway routes.
+
+    Compat route expects provider-prefixed model names, e.g.:
+      - workers-ai/@cf/baai/bge-m3
+      - openai/text-embedding-3-small
+    """
+    base = (base_url or "").rstrip("/")
+    model = (model_name or "").strip()
+    if not model:
+        return model
+
+    if "/compat" in base:
+        if model.startswith("@cf/"):
+            return f"workers-ai/{model}"
+        if "/" not in model:
+            if model.startswith("text-embedding-"):
+                return f"openai/{model}"
+            return f"workers-ai/{model}"
+    return model
+
+
 _chat_client = None
 _embed_client = None
 _chat_base_url, _embed_base_url = _normalize_cloudflare_base_urls(CLOUDFLARE_GATEWAY_URL)
+_resolved_embed_model = _resolve_embed_model(_embed_base_url, EMBED_MODEL)
 
 
 log.info("Cloudflare chat base URL: %s", _chat_base_url)
 if _embed_base_url != _chat_base_url:
     log.info("Cloudflare embeddings base URL: %s", _embed_base_url)
+if _resolved_embed_model != EMBED_MODEL:
+    log.info("Normalized embeddings model for route compatibility: %s -> %s", EMBED_MODEL, _resolved_embed_model)
 log.info("Model config: lead=%s eval=%s summary=%s synthesis=%s citation=%s revision=%s",
          LEAD_MODEL, EVAL_MODEL, SUMMARY_MODEL, SYNTHESIS_MODEL, CITATION_MODEL, REVISION_MODEL)
 
@@ -431,7 +456,7 @@ def embed(texts):
     max_attempts = 5
     for attempt in range(1, max_attempts + 1):
         try:
-            resp = client.embeddings.create(model=EMBED_MODEL, input=cleaned_inputs)
+            resp = client.embeddings.create(model=_resolved_embed_model, input=cleaned_inputs)
             dense = [None] * total_inputs
             for source_idx, embedding_obj in zip(index_map, resp.data):
                 dense[source_idx] = embedding_obj.embedding
