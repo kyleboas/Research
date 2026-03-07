@@ -205,6 +205,47 @@
         font-size: 0.93rem;
       }
 
+      .run-controls {
+        margin-top: 8px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .run-step-btn {
+        border: 1px solid var(--line);
+        background: #fff;
+        border-radius: 8px;
+        padding: 6px 10px;
+        font-size: 0.86rem;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      .run-step-btn:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+
+      .step-run-block {
+        margin-top: 12px;
+        border-top: 1px solid var(--line);
+        padding-top: 10px;
+      }
+
+      .step-run-log {
+        margin-top: 6px;
+        background: #111827;
+        color: #e5e7eb;
+        border-radius: 8px;
+        padding: 8px;
+        max-height: 120px;
+        overflow: auto;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-size: 0.75rem;
+        white-space: pre-wrap;
+      }
+
       /* ── Badges ── */
       .badge {
         display: inline-block;
@@ -228,6 +269,10 @@
       .badge-novelty-high { background: #d1fae5; color: #065f46; }
       .badge-novelty-mid { background: #fef3c7; color: #92400e; }
       .badge-novelty-low { background: #fee2e2; color: #991b1b; }
+      .badge-step-idle { background: #f3f4f6; color: #6b7280; }
+      .badge-step-running { background: #dbeafe; color: #1d4ed8; }
+      .badge-step-success { background: #d1fae5; color: #065f46; }
+      .badge-step-failed { background: #fee2e2; color: #991b1b; }
 
       /* ── Score breakdown bar ── */
       .score-breakdown {
@@ -641,6 +686,7 @@
       };
 
       let statusCountdownTimer = null;
+      let dashboardRefreshTimer = null;
 
       const renderScheduleCards = () => {
         const now = new Date();
@@ -712,12 +758,41 @@
         return html;
       };
 
-      const renderStatus = (items, debug) => {
+      const stepRunBadge = (status) => {
+        const value = (status || "idle").toLowerCase();
+        const cls = ["idle", "running", "success", "failed"].includes(value) ? value : "idle";
+        return `<span class="badge badge-step-${cls}">${escapeHtml(value)}</span>`;
+      };
+
+      const triggerStepRun = async (step) => {
+        try {
+          const response = await fetch("/api/run-step", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ step }),
+          });
+          const payload = await response.json();
+          if (!response.ok) {
+            throw new Error(payload.error || "Failed to trigger step");
+          }
+          await loadDashboard();
+        } catch (error) {
+          alert(`Unable to trigger ${step}: ${error.message}`);
+        }
+      };
+
+      const renderStatus = (items, debug, stepRuns) => {
         const scheduleCards = [
           { key: "ingest", label: "Next ingest" },
           { key: "detect", label: "Next detect" },
           { key: "report", label: "Next report" },
         ];
+
+        const runEntries = ["ingest", "detect", "report"].map((name) => ({
+          name,
+          data: stepRuns?.[name] || { status: "idle" },
+        }));
+        const isAnyRunning = runEntries.some((entry) => (entry.data?.status || "").toLowerCase() === "running");
 
         const runtimeCards = items.length
           ? items
@@ -733,7 +808,28 @@
             (entry) =>
               `<section class="status-card"><p class="status-label">${entry.label}</p><p class="status-value" data-next-time="${entry.key}">—</p><p class="status-subvalue" data-next-countdown="${entry.key}">Countdown: —</p></section>`
           )
-          .join("")}${runtimeCards}</div>${renderDebugSection(debug)}`;
+          .join("")}${runtimeCards}
+          <section class="status-card">
+            <p class="status-label">Manual pipeline runs</p>
+            <p class="status-subvalue">Run ingest/detect/report now from the dashboard.</p>
+            <div class="run-controls">
+              ${["ingest", "detect", "report"].map((step) => `<button class="run-step-btn" data-run-step="${step}" ${isAnyRunning ? "disabled" : ""}>Run ${step}</button>`).join("")}
+            </div>
+            ${runEntries.map((entry) => `
+              <div class="step-run-block">
+                <p class="status-label" style="margin-bottom:4px;text-transform:capitalize">${entry.name} ${stepRunBadge(entry.data?.status || "idle")}</p>
+                <p class="status-subvalue">Started: ${safeText(formatIsoTime(entry.data?.started_at), "—")}</p>
+                <p class="status-subvalue">Finished: ${safeText(formatIsoTime(entry.data?.finished_at), "—")}</p>
+                <p class="status-subvalue">Exit code: ${entry.data?.exit_code == null ? "—" : escapeHtml(String(entry.data.exit_code))}</p>
+                ${entry.data?.log_tail ? `<div class="step-run-log">${escapeHtml(entry.data.log_tail)}</div>` : ""}
+              </div>
+            `).join("")}
+          </section>
+          </div>${renderDebugSection(debug)}`;
+
+        statusEl.querySelectorAll(".run-step-btn").forEach((button) => {
+          button.addEventListener("click", () => triggerStepRun(button.dataset.runStep));
+        });
 
         renderScheduleCards();
         if (statusCountdownTimer) {
@@ -756,7 +852,7 @@
           renderDetect(payload.detect || []);
           renderPatterns(payload.patterns || []);
           renderReports(payload.reports || []);
-          renderStatus(payload.status || [], payload.debug || null);
+          renderStatus(payload.status || [], payload.debug || null, payload.step_runs || {});
 
           if (payload.warning) {
             logsEl.insertAdjacentHTML(
@@ -775,6 +871,7 @@
       };
 
       loadDashboard();
+      dashboardRefreshTimer = setInterval(loadDashboard, 15000);
 
       const tabs = [...document.querySelectorAll(".tab-btn")];
       tabs.forEach((btn) => {
