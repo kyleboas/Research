@@ -48,6 +48,62 @@ Final reports are saved to:
 - Postgres table `reports`, and
 - local `reports/YYYY-MM-DD-<slug>.md`.
 
+## Architecture wireframe
+
+```text
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                                Data Sources                                 │
+│  RSS feeds via NewsBlur                      YouTube channels + TranscriptAPI│
+└────────────────────────────────┬─────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                              Ingestion Layer                                │
+│  main.py::run_ingest                                                        │
+│   • fetch_newsblur() + fetch_youtube()                                      │
+│   • optional full-text extraction (article_extractor.py)                    │
+│   • chunk_and_embed() → source_chunks (pgvector embeddings)                 │
+└────────────────────────────────┬─────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                              Storage Layer                                  │
+│  Postgres tables: sources, source_chunks, trend_candidates, reports,        │
+│  trend_feedback, trend_candidate_sources                                    │
+└────────────────────────────────┬─────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                              Detection Layer                                │
+│  main.py::run_detect                                                        │
+│   1) BERTrend weak-signal detector (trend_detection.py)                     │
+│   2) tactical pattern novelty detector                                      │
+│      (tactical_extraction.py + novelty_scoring.py)                          │
+│   3) LLM-only fallback detector                                              │
+│  scoring = base score + feedback adjustment + novelty adjustment            │
+└────────────────────────────────┬─────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                           Report Generation Layer                           │
+│  main.py::run_report / generate_report                                      │
+│   • quality gate (min score + source diversity)                             │
+│   • planner (LeadResearcher)                                                │
+│   • parallel OODA subagents                                                 │
+│   • synthesis + sufficiency evaluation                                      │
+│   • citation verification + final revision                                  │
+└────────────────────────────────┬─────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                               Outputs & Ops                                 │
+│  • reports table + local markdown reports/                                  │
+│  • dashboard + APIs (server.py: /api/dashboard, /api/run-step,             │
+│    /api/trend-feedback)                                                     │
+│  • cron or manual CLI step execution                                        │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
 ## Requirements
 
 - Python 3.11+
