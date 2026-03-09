@@ -1,80 +1,211 @@
 # Football Research Pipeline
 
-Automatic deep research system that ingests football content, detects novel tactical trends, and generates production-grade sourced reports using multi-agent orchestration.
+Automated football research workflow that:
 
-Architecture mirrors [Anthropic's multi-agent research system](https://www.anthropic.com/engineering/multi-agent-research-system), implemented here with OpenAI models authenticated via ChatGPT OAuth.
+1. ingests RSS + YouTube transcript content,
+2. detects potentially novel tactical trends, and
+3. generates citation-checked markdown reports.
 
-## How it works
+The core pipeline lives in `main.py`, with a lightweight dashboard/runner in `server.py`.
 
-1. **Ingest** — Fetches RSS feeds and YouTube transcripts every hour (top of hour), stores full content in Supabase Postgres with vector embeddings.
-2. **Detect** — Uses OpenAI models (via ChatGPT OAuth) to identify novel tactics being tried by players/teams before they become mainstream.
-3. **Report** — Multi-agent deep research pipeline:
+## Pipeline overview
 
+### 1) Ingest (`--step ingest`)
+
+- Pulls RSS stories from NewsBlur (`/reader/river_stories`).
+- Pulls recent videos from configured YouTube channels via channel RSS feeds.
+- Fetches transcripts from TranscriptAPI for discovered videos.
+- Runs optional full-text extraction for short RSS bodies (`article_extractor.py`).
+- Chunks content and stores embeddings in Postgres (`source_chunks.embedding`).
+
+### 2) Detect (`--step detect`)
+
+Detection is layered:
+
+- BERTrend-inspired weak-signal detector (`trend_detection.py`).
+- Tactical pattern detector (`tactical_extraction.py` + `novelty_scoring.py`).
+- LLM-only fallback if algorithmic detectors produce no candidates.
+
+Candidate scores are adjusted by:
+
+- historical user feedback (`trend_feedback`),
+- novelty bonus/penalty,
+- source diversity.
+
+### 3) Report (`--step report`)
+
+The report stage selects top pending candidates that pass quality gates and then runs a multi-agent research flow:
+
+- planner / lead researcher,
+- parallel OODA-loop subagents,
+- synthesis,
+- sufficiency check (+ optional second round),
+- citation verification,
+- final revision.
+
+Final reports are saved to:
+
+- Postgres table `reports`, and
+- local `reports/YYYY-MM-DD-<slug>.md`.
+
+## Architecture wireframe
+
+```text
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                                Data Sources                                 │
+│  RSS feeds via NewsBlur                      YouTube channels + TranscriptAPI│
+└────────────────────────────────┬─────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                              Ingestion Layer                                │
+│  main.py::run_ingest                                                        │
+│   • fetch_newsblur() + fetch_youtube()                                      │
+│   • optional full-text extraction (article_extractor.py)                    │
+│   • chunk_and_embed() → source_chunks (pgvector embeddings)                 │
+└────────────────────────────────┬─────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                              Storage Layer                                  │
+│  Postgres tables: sources, source_chunks, trend_candidates, reports,        │
+│  trend_feedback, trend_candidate_sources                                    │
+└────────────────────────────────┬─────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                              Detection Layer                                │
+│  main.py::run_detect                                                        │
+│   1) BERTrend weak-signal detector (trend_detection.py)                     │
+│   2) tactical pattern novelty detector                                      │
+│      (tactical_extraction.py + novelty_scoring.py)                          │
+│   3) LLM-only fallback detector                                              │
+│  scoring = base score + feedback adjustment + novelty adjustment            │
+└────────────────────────────────┬─────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                           Report Generation Layer                           │
+│  main.py::run_report / generate_report                                      │
+│   • quality gate (min score + source diversity)                             │
+│   • planner (LeadResearcher)                                                │
+│   • parallel OODA subagents                                                 │
+│   • synthesis + sufficiency evaluation                                      │
+│   • citation verification + final revision                                  │
+└────────────────────────────────┬─────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                               Outputs & Ops                                 │
+│  • reports table + local markdown reports/                                  │
+│  • dashboard + APIs (server.py: /api/dashboard, /api/run-step,             │
+│    /api/trend-feedback)                                                     │
+│  • cron or manual CLI step execution                                        │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
-┌─────────────────────────────────────────────────────┐
-│ LeadResearcher (Opus + extended thinking)            │
-│ - Assesses complexity (simple/moderate/complex)      │
-│ - Decomposes into non-overlapping research angles    │
-│ - Calibrates subagent count + retrieval depth        │
-└───────────────────────┬─────────────────────────────┘
-                        │
-                        ▼
-┌─────────────────────────────────────────────────────┐
-│ Parallel Subagents (Sonnet × N)                     │
-│ OODA loop per angle:                                │
-│   Observe: hybrid search (semantic + keyword RRF)   │
-│   Orient:  evaluate coverage vs objective           │
-│   Decide:  generate narrower query or stop          │
-│   Act:     retrieve again (up to 5 rounds)          │
-└───────────────────────┬─────────────────────────────┘
-                        │
-                        ▼
-┌─────────────────────────────────────────────────────┐
-│ Synthesis                                           │
-│ Merge all subagent outputs into cohesive draft      │
-└───────────────────────┬─────────────────────────────┘
-                        │
-                        ▼
-┌─────────────────────────────────────────────────────┐
-│ Sufficiency Evaluation (LeadResearcher re-planning) │
-│ - Evaluates draft quality with extended thinking    │
-│ - If gaps found: spawn MORE subagents → re-synth   │
-│ - Up to 2 research rounds                          │
-└───────────────────────┬─────────────────────────────┘
-                        │
-                        ▼
-┌─────────────────────────────────────────────────────┐
-│ CitationAgent                                       │
-│ Verifies every [S:C] tag maps to real evidence      │
-│ Flags hallucinated IDs, uncited claims, mismatches  │
-└───────────────────────┬─────────────────────────────┘
-                        │
-                        ▼
-┌─────────────────────────────────────────────────────┐
-│ Revision Editor                                     │
-│ Applies all citation fixes, qualifies speculation,  │
-│ produces final publication-quality report            │
-└─────────────────────────────────────────────────────┘
+
+## Requirements
+
+- Python 3.11+
+- Postgres with `pgvector`
+- Cloudflare AI Gateway URL + token (OpenAI-compatible API endpoint)
+- NewsBlur account credentials
+- TranscriptAPI key
+
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
 ```
 
-LLM calls use your **ChatGPT subscription OAuth login** (no LLM API keys required).
+## Configuration
 
-LLM calls are routed through Cloudflare AI Gateway, and the runtime normalizes gateway URLs so OpenAI SDK path appending does not produce malformed endpoints (for example duplicated `/chat/completions`).
+Copy env template:
 
-For embeddings, the pipeline always sends OpenAI-compatible payloads (`model` + `input`) and auto-normalizes model names for `/compat` routes (for example `@cf/baai/bge-m3` becomes `workers-ai/@cf/baai/bge-m3`).
+```bash
+cp env.example .env
+```
 
-The runtime sends `cf-aig-authorization: Bearer <CLOUDFLARE_GATEWAY_TOKEN>` with gateway requests.
+Required environment variables (see `env.example`):
 
-## Setup
+- `CLOUDFLARE_GATEWAY_URL`
+- `CLOUDFLARE_GATEWAY_TOKEN`
+- `NEWSBLUR_USERNAME`
+- `NEWSBLUR_PASSWORD`
+- `TRANSCRIPT_API_KEY`
+- database connection (`DATABASE_URL` or Railway-style `PG*` variables)
 
-1. Run `sql/schema.sql` in your Supabase SQL editor (enable pgvector first).
-2. Copy `env.example` to `.env` and set database/transcript variables.
-3. `pip install -r requirements.txt`
-4. Run ingest manually once: `python main.py --step ingest`
-5. Detect candidates: `python main.py --step detect`
-6. Generate a report from top pending candidate: `python main.py --step report`
+Model selection defaults come from `config.json` and can be overridden via env vars (`MODEL`, `LEAD_MODEL`, `EMBED_MODEL`, etc.).
 
-## Cron (recommended split schedules)
+## Database setup
+
+1. Enable `vector` extension in Postgres/Supabase.
+2. Apply schema:
+
+```bash
+psql "$DATABASE_URL" -f sql/schema.sql
+```
+
+3. If upgrading an existing database, also run:
+
+```bash
+psql "$DATABASE_URL" -f sql/migrate_multilang.sql
+```
+
+## Feed configuration
+
+- RSS feed list: `feeds/rss.md` (curated reference list)
+- YouTube source list actually used by ingestion: `feeds/youtube.md`
+
+`feeds/youtube.md` format:
+
+```text
+Channel Name: https://www.youtube.com/channel/UCxxxxxxxxxxxxxxxxxxxxxx
+```
+
+The ingest step normalizes YouTube sources to canonical `/channel/UC...` URLs.
+
+## CLI usage
+
+Run one step:
+
+```bash
+python main.py --step ingest
+python main.py --step detect
+python main.py --step report
+```
+
+Run combined:
+
+```bash
+python main.py --step all
+```
+
+Notes:
+
+- default step is `ingest`.
+- `--step all` runs ingest + detect.
+- add `--allow-report-after-detect` to include report generation in the same run.
+- `--min-new-sources-for-detect N` skips detect when latest ingest added fewer than `N` sources.
+
+## Dashboard server
+
+Start local dashboard:
+
+```bash
+python server.py
+```
+
+Default URL: `http://localhost:8080/`
+
+The dashboard can:
+
+- show ingest/detect/report records,
+- show run status and metrics,
+- trigger pipeline steps (`/api/run-step`),
+- record trend feedback (`/api/trend-feedback`).
+
+## Suggested cron split
 
 ```bash
 0 * * * * cd /path/to/research && /path/to/python main.py --step ingest >> logs/ingest.log 2>&1
@@ -82,20 +213,13 @@ The runtime sends `cf-aig-authorization: Bearer <CLOUDFLARE_GATEWAY_TOKEN>` with
 0 1 * * * cd /path/to/research && /path/to/python main.py --step report >> logs/report.log 2>&1
 ```
 
-`python main.py` defaults to `--step ingest`.
+## Key files
 
-`--step all` now runs ingest + detect only. To explicitly allow same-process reporting, pass `--allow-report-after-detect`.
-
-## Feeds
-
-Edit `feeds/rss.md` and `feeds/youtube.md` to add/remove sources.
-
-## Files
-
-```
-main.py              # entire pipeline (single file)
-sql/schema.sql       # 3 tables + hybrid RRF search function
-feeds/rss.md         # RSS feed list
-feeds/youtube.md     # YouTube channel list
-reports/             # generated reports (gitignored)
-```
+- `main.py` – end-to-end pipeline logic
+- `server.py` – dashboard + step runner API
+- `trend_detection.py` – BERTrend-inspired signal detection
+- `tactical_extraction.py` – football-aware tactical parsing/chunk context
+- `novelty_scoring.py` – novelty baseline + scoring
+- `article_extractor.py` – RSS/full-text extraction logic
+- `db_conn.py` – resilient DB conninfo resolution
+- `sql/schema.sql` – schema and search functions

@@ -1,6 +1,8 @@
 # RSS Feeds
 
-> Curated list of RSS feeds monitored for football tactical analysis, reporting, and related content.
+> Curated list of football analysis sources.
+> 
+> Note: RSS ingestion is performed through NewsBlur (`main.py` -> `fetch_newsblur`) and uses your NewsBlur account's river feed. This file is maintained as source documentation/reference for monitored outlets.
 
 ## 1. Other
 
