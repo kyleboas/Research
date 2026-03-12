@@ -1,6 +1,6 @@
 {
   "lead_model": "deepseek/deepseek-r1",
-  "model": "google-ai-studio/gemini-2.5-flash",
+  "model": "workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast",
   "embed_model": "workers-ai/@cf/baai/bge-m3",
   "signal_model": "workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast",
 
