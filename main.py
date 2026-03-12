@@ -305,12 +305,18 @@ def _newsblur_session():
         raise RuntimeError(f"NewsBlur login failed: {result.get('errors', result)}")
     return opener
 
-def fetch_newsblur():
+def fetch_newsblur(since_ts=None):
     """Fetch recent stories from NewsBlur river of news.
 
     Treats RSS as discovery: fetches the feed for URLs and metadata, then
     uses full-text extraction to get the actual article body when the RSS
     content looks truncated (< 500 words).
+
+    Args:
+        since_ts: Optional Unix timestamp (int/float). When provided, only
+                  stories newer than this time are fetched via NewsBlur's
+                  ``newer_than`` parameter so repeat runs don't re-process
+                  stories that were already ingested.
     """
     try:
         opener = _newsblur_session()
@@ -318,7 +324,10 @@ def fetch_newsblur():
         log.warning("NewsBlur login failed: %s", e)
         return []
     try:
-        req = Request("https://newsblur.com/reader/river_stories?read_filter=all&order=newest&limit=100")
+        url = "https://newsblur.com/reader/river_stories?read_filter=all&order=newest&limit=100"
+        if since_ts is not None:
+            url += f"&newer_than={int(since_ts)}"
+        req = Request(url)
         req.add_header("User-Agent", "ResearchBot/1.0")
         with opener.open(req, timeout=30) as r:
             data = json.loads(r.read())
@@ -1924,7 +1933,18 @@ def run_ingest(conn):
 
     normalize_youtube_source_config(ROOT / "feeds" / "youtube.md")
 
-    for item in fetch_newsblur():
+    # Determine since_ts so NewsBlur only returns stories newer than the last run.
+    since_ts = None
+    last_completed = load_state(conn, "last_ingest_completed_at")
+    if last_completed:
+        try:
+            dt = datetime.fromisoformat(last_completed)
+            since_ts = dt.timestamp()
+            log.info("Fetching NewsBlur stories newer_than=%s (%s)", int(since_ts), last_completed)
+        except Exception as e:
+            log.warning("Could not parse last_ingest_completed_at %r: %s — fetching all stories", last_completed, e)
+
+    for item in fetch_newsblur(since_ts=since_ts):
         candidates_found += 1
         articles_extracted += 1
         dedupe_key = item["key"]
