@@ -1,14 +1,14 @@
 {
-  "lead_model": "deepseek/deepseek-r1",
-  "model": "google/gemini-2.5-flash",
+  "lead_model": "workers-ai/@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
+  "model": "workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast",
   "embed_model": "workers-ai/@cf/baai/bge-m3",
   "signal_model": "workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast",
 
-  "synthesis_model": "anthropic/claude-opus-4-6",
-  "summary_model": "anthropic/claude-sonnet-4-6",
-  "revision_model": "anthropic/claude-opus-4-6",
-  "citation_model": "google/gemini-2.5-flash",
-  "eval_model": "google/gemini-2.5-flash",
+  "synthesis_model": "workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+  "summary_model": "workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+  "revision_model": "workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+  "citation_model": "workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+  "eval_model": "workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast",
 
   "bertrend": {
     "window_days": 1,
