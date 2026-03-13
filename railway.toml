@@ -22,10 +22,13 @@ builder = "nixpacks"
 #     PIPELINE_STEP=report
 #     Cron schedule: 0 1 * * *     (daily at 8pm EST / 01:00 UTC)
 #
+#   Service: autoresearch
+#     PIPELINE_STEP=autoresearch_hourly
+#     Cron schedule: 15 * * * *    (hourly, offset from ingest)
+#
 # Set these variables in Railway's Variables tab for all three services:
 #
 #   DATABASE_URL              ${{pgvector.DATABASE_URL}}   ← Railway reference variable
-#   TRANSCRIPT_API_KEY        your-transcript-api-key
 #   CLOUDFLARE_GATEWAY_URL    https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_name}/openai
 #   CLOUDFLARE_GATEWAY_TOKEN  your-cloudflare-ai-gateway-token
 #
@@ -33,11 +36,11 @@ builder = "nixpacks"
 #   PIPELINE_FLAGS            --min-new-sources-for-detect=5   (detect service example)
 #
 # Optional manual/cron quality jobs you can also run from this same repo:
-#   - report quality eval: python autoresearch_report/eval_report.py --refresh-auto
-#   - report policy benchmark: python autoresearch_report/benchmark_report.py --refresh-auto --limit 3
-#   - report policy optimize: python autoresearch_report/optimize_report_policy.py --refresh-auto --limit 3
-#   - detect policy eval:  python autoresearch_detect/eval_detect.py
-#   - detect policy tune:  python autoresearch_detect/optimize_detect_policy.py --refresh-auto --apply
+#   - report quality eval: python autoresearch/report/eval_report.py --refresh-auto
+#   - report policy benchmark: python autoresearch/report/benchmark_report.py --refresh-auto --limit 3
+#   - report policy optimize: python autoresearch/report/optimize_report_policy.py --refresh-auto --limit 3
+#   - detect policy eval:  python autoresearch/detect/eval_detect.py
+#   - detect policy tune:  python autoresearch/detect/optimize_detect_policy.py --refresh-auto --apply
 #
 # Avoid --step all in production. If you intentionally need full same-process
 # execution, set PIPELINE_STEP=all and PIPELINE_FLAGS=--allow-report-after-detect.
@@ -45,5 +48,5 @@ builder = "nixpacks"
 # After first deploy, run sql/schema.sql via Railway's Postgres query console
 # (or psql) to create the tables.
 
-startCommand = "bash -lc 'if [ -z \"${PIPELINE_STEP}\" ] || [ \"${PIPELINE_STEP}\" = \"web\" ]; then python server.py; else python main.py --step \"${PIPELINE_STEP}\" ${PIPELINE_FLAGS}; fi'"
+startCommand = "bash -lc 'if [ -z \"${PIPELINE_STEP}\" ] || [ \"${PIPELINE_STEP}\" = \"web\" ]; then python server.py; elif [ \"${PIPELINE_STEP}\" = \"autoresearch_hourly\" ]; then python autoresearch/pipeline.py; else python main.py --step \"${PIPELINE_STEP}\" ${PIPELINE_FLAGS}; fi'"
 restartPolicyType = "never"

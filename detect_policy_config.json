@@ -2,11 +2,11 @@
   "novelty_center": 0.5,
   "novelty_weight": 30,
   "single_source_penalty": -12,
-  "few_sources_bonus": 6,
+  "few_sources_bonus": 3,
   "several_sources_bonus": 2,
   "many_sources_penalty": -6,
   "few_sources_max": 4,
   "several_sources_max": 8,
-  "report_min_score": 40,
+  "report_min_score": 45,
   "report_min_sources": 2
 }

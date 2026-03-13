@@ -1,6 +1,6 @@
 import unittest
 
-from autoresearch_report.evaluator import evaluate_items, score_report
+from autoresearch.report.evaluator import evaluate_items, score_report
 
 
 GOOD_REPORT = """# Example

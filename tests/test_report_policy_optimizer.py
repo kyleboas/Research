@@ -1,6 +1,6 @@
 import unittest
 
-from autoresearch_report.benchmark_report import (
+from autoresearch.report.benchmark_report import (
     estimate_report_llm_cost,
     policy_changed,
     quality_per_dollar,

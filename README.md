@@ -29,7 +29,7 @@ The repo is organized around stable surfaces rather than deep package nesting:
 
 - Pulls RSS stories from NewsBlur (`/reader/river_stories`).
 - Pulls recent videos from configured YouTube channels via channel RSS feeds.
-- Fetches transcripts from TranscriptAPI for discovered videos.
+- Fetches transcripts from `defuddle.md` for discovered videos.
 - Runs optional full-text extraction for short RSS bodies (`article_extractor.py`).
 - Re-reads a configurable overlap window on incremental runs so late-arriving RSS stories or videos are deduped instead of missed.
 - Chunks content and stores embeddings in Postgres (`source_chunks.embedding`).
@@ -84,7 +84,7 @@ Each report run also writes a persistent artifact bundle under `report_runs/<tim
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │                                Data Sources                                 │
-│  RSS feeds via NewsBlur                      YouTube channels + TranscriptAPI│
+│  RSS feeds via NewsBlur                         YouTube channels + defuddle.md│
 └────────────────────────────────┬─────────────────────────────────────────────┘
                                  │
                                  ▼
@@ -142,7 +142,7 @@ Each report run also writes a persistent artifact bundle under `report_runs/<tim
 - Postgres with `pgvector`
 - Cloudflare AI Gateway URL + token (OpenAI-compatible API endpoint)
 - NewsBlur account credentials
-- TranscriptAPI key
+- internet access to `defuddle.md` for YouTube transcript fetches
 
 Install dependencies:
 
@@ -164,7 +164,6 @@ Required environment variables (see `env.example`):
 - `CLOUDFLARE_GATEWAY_TOKEN`
 - `NEWSBLUR_USERNAME`
 - `NEWSBLUR_PASSWORD`
-- `TRANSCRIPT_API_KEY`
 - database connection (`DATABASE_URL` or Railway-style `PG*` variables)
 
 Optional ingest safety knobs:
@@ -267,47 +266,65 @@ Live policy files:
 
 Harness files:
 
-- `autoresearch_detect/program.md`
-- `autoresearch_detect/eval_detect.py`
-- `autoresearch_detect/evaluator.py`
-- `autoresearch_detect/export_candidates_snapshot.py`
-- `autoresearch_detect/optimize_detect_policy.py`
-- `autoresearch_detect/fixtures/candidates.json`
-- `autoresearch_report/program.md`
-- `autoresearch_report/eval_report.py`
-- `autoresearch_report/evaluator.py`
-- `autoresearch_report/export_reports_snapshot.py`
-- `autoresearch_report/benchmark_report.py`
-- `autoresearch_report/optimize_report_policy.py`
+- `autoresearch/pipeline.py`
+- `autoresearch/ingest/optimize_ingest_policy.py`
+- `autoresearch/detect/program.md`
+- `autoresearch/detect/eval_detect.py`
+- `autoresearch/detect/evaluator.py`
+- `autoresearch/detect/export_candidates_snapshot.py`
+- `autoresearch/detect/optimize_detect_policy.py`
+- `autoresearch/detect/fixtures/candidates.json`
+- `autoresearch/report/program.md`
+- `autoresearch/report/eval_report.py`
+- `autoresearch/report/evaluator.py`
+- `autoresearch/report/export_reports_snapshot.py`
+- `autoresearch/report/benchmark_report.py`
+- `autoresearch/report/optimize_report_policy.py`
 
 Run the evaluator on the starter fixture:
 
 ```bash
-.venv/bin/python autoresearch_detect/eval_detect.py
+.venv/bin/python autoresearch/detect/eval_detect.py
 ```
 
 Run the report-quality evaluator against recent reports from Postgres:
 
 ```bash
-.venv/bin/python autoresearch_report/eval_report.py --refresh-auto
+.venv/bin/python autoresearch/report/eval_report.py --refresh-auto
+```
+
+Tune ingest policy from observed source lag and daily source volume:
+
+```bash
+.venv/bin/python autoresearch/ingest/optimize_ingest_policy.py --apply
+```
+
+Run the full no-LLM hourly autoresearch loop:
+
+```bash
+.venv/bin/python autoresearch/pipeline.py
 ```
 
 Benchmark a small fixed set of recent report topics under candidate report
-policies and compare the generated output scores:
+policies and compare generated output scores. This is a manual LLM-backed check,
+not part of the hourly no-LLM autoresearch loop:
 
 ```bash
-.venv/bin/python autoresearch_report/benchmark_report.py --refresh-auto --limit 3
+.venv/bin/python autoresearch/report/benchmark_report.py --refresh-auto --limit 3
 ```
 
-Search for the best report policy on recent topics and apply it to the live pipeline:
+Search for the best report policy on recent report metrics and apply it to the
+live pipeline:
 
 ```bash
-.venv/bin/python autoresearch_report/optimize_report_policy.py --refresh-auto --limit 2
+.venv/bin/python autoresearch/report/optimize_report_policy.py --refresh-auto --limit 2
 ```
 
 The report optimizer now has a built-in safety rule: it only applies a new
 policy when the best candidate beats the baseline by at least the configured
-minimum improvement. Each run is also persisted to Postgres in
+minimum improvement. The daily optimize path is no-LLM: it scores recent stored
+reports, simulates candidate policies mathematically, and writes the winning
+policy back for future main-pipeline runs. Each run is also persisted to Postgres in
 `report_policy_runs`, and summary fields are mirrored into `pipeline_state` for
 dashboard/debug visibility.
 
@@ -319,29 +336,29 @@ the best quality-per-dollar option and records that decision explicitly.
 Export a real candidate snapshot for manual labeling:
 
 ```bash
-.venv/bin/python autoresearch_detect/export_candidates_snapshot.py \
-  --output autoresearch_detect/fixtures/live_candidates.json
+.venv/bin/python autoresearch/detect/export_candidates_snapshot.py \
+  --output autoresearch/detect/fixtures/live_candidates.json
 ```
 
 Export a snapshot with obvious labels inferred from report status and feedback:
 
 ```bash
-.venv/bin/python autoresearch_detect/export_candidates_snapshot.py \
+.venv/bin/python autoresearch/detect/export_candidates_snapshot.py \
   --label-mode auto \
-  --output autoresearch_detect/fixtures/live_candidates.auto.json
+  --output autoresearch/detect/fixtures/live_candidates.auto.json
 ```
 
 Evaluate any labeled fixture:
 
 ```bash
-.venv/bin/python autoresearch_detect/eval_detect.py \
-  --fixture autoresearch_detect/fixtures/live_candidates.json
+.venv/bin/python autoresearch/detect/eval_detect.py \
+  --fixture autoresearch/detect/fixtures/live_candidates.json
 ```
 
 Search for better detect settings and apply them to the live pipeline:
 
 ```bash
-.venv/bin/python autoresearch_detect/optimize_detect_policy.py \
+.venv/bin/python autoresearch/detect/optimize_detect_policy.py \
   --refresh-auto \
   --apply
 ```
@@ -352,6 +369,7 @@ That tuning command exports an auto-labeled snapshot from the DB, searches a gri
 
 ```bash
 0 * * * * cd /path/to/research && /path/to/python main.py --step ingest >> logs/ingest.log 2>&1
+15 * * * * cd /path/to/research && /path/to/python autoresearch/pipeline.py >> logs/autoresearch.log 2>&1
 0 */6 * * * cd /path/to/research && /path/to/python main.py --step detect --min-new-sources-for-detect 5 >> logs/detect.log 2>&1
 0 1 * * * cd /path/to/research && /path/to/python main.py --step report >> logs/report.log 2>&1
 ```

@@ -16,6 +16,8 @@ from dotenv import load_dotenv
 
 from db_conn import resolve_database_conninfo
 from detect_policy import compute_final_score
+from ingest_policy import get_policy_path as get_ingest_policy_path
+from runtime_logging import ensure_pipeline_runs_table, finish_run, format_duration, start_run, utc_now, utc_now_iso
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
@@ -27,45 +29,55 @@ RUN_COMMANDS = {
     "detect": [sys.executable, str(ROOT / "main.py"), "--step", "detect"],
     "rescore": [sys.executable, str(ROOT / "main.py"), "--step", "rescore"],
     "report": [sys.executable, str(ROOT / "main.py"), "--step", "report"],
+    "autoresearch_hourly": [sys.executable, str(ROOT / "autoresearch" / "pipeline.py")],
+    "ingest_policy_optimize": [
+        sys.executable,
+        str(ROOT / "autoresearch" / "ingest" / "optimize_ingest_policy.py"),
+        "--apply",
+    ],
     "report_policy_eval": [
         sys.executable,
-        str(ROOT / "autoresearch_report" / "eval_report.py"),
+        str(ROOT / "autoresearch" / "report" / "eval_report.py"),
         "--refresh-auto",
     ],
     "report_policy_benchmark": [
         sys.executable,
-        str(ROOT / "autoresearch_report" / "benchmark_report.py"),
+        str(ROOT / "autoresearch" / "report" / "benchmark_report.py"),
         "--refresh-auto",
         "--limit",
         "3",
     ],
     "report_policy_optimize": [
         sys.executable,
-        str(ROOT / "autoresearch_report" / "optimize_report_policy.py"),
+        str(ROOT / "autoresearch" / "report" / "optimize_report_policy.py"),
         "--refresh-auto",
         "--limit",
         "3",
     ],
-    "detect_policy_eval": [sys.executable, str(ROOT / "autoresearch_detect" / "eval_detect.py")],
+    "detect_policy_eval": [sys.executable, str(ROOT / "autoresearch" / "detect" / "eval_detect.py")],
     "detect_policy_optimize": [
         sys.executable,
-        str(ROOT / "autoresearch_detect" / "optimize_detect_policy.py"),
+        str(ROOT / "autoresearch" / "detect" / "optimize_detect_policy.py"),
         "--refresh-auto",
         "--apply",
     ],
 }
 _run_lock = Lock()
-_step_runs = {
-    "ingest": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
-    "detect": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
-    "rescore": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
-    "report": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
-    "report_policy_eval": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
-    "report_policy_benchmark": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
-    "report_policy_optimize": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
-    "detect_policy_eval": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
-    "detect_policy_optimize": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
-}
+
+
+def _empty_step_run_state():
+    return {
+        "status": "idle",
+        "started_at": None,
+        "finished_at": None,
+        "duration_seconds": None,
+        "duration_human": None,
+        "exit_code": None,
+        "log_tail": "",
+    }
+
+
+_step_runs = {name: _empty_step_run_state() for name in RUN_COMMANDS}
 _active_processes = {}
 
 
@@ -114,6 +126,54 @@ def _format_detect_candidates_notification(candidates):
         lines.append("• " + " | ".join(parts))
     if len(candidates) > 5:
         lines.append(f"• +{len(candidates) - 5} more")
+    return "\n".join(lines)
+
+
+def _parse_ingest_policy_summary(log_text):
+    text = str(log_text or "")
+    result = {}
+    patterns = {
+        "policy_path": r"policy_path=(.+)",
+        "baseline": r"baseline=(-?\d+\.\d+)",
+        "best": r"best=(-?\d+\.\d+)",
+        "delta": r"delta=(-?\d+\.\d+)",
+        "min_improvement": r"min_improvement=(-?\d+\.\d+)",
+        "policy_changed": r"policy_changed=(yes|no)",
+        "apply_decision": r"apply_decision=([a-z_]+)",
+        "best_policy": r"best_policy=(\{.+\})",
+        "applied_policy": r"applied_policy=(.+)",
+    }
+    for key, pattern in patterns.items():
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        if key == "best_policy":
+            try:
+                result[key] = json.loads(match.group(1))
+            except json.JSONDecodeError:
+                result[key] = match.group(1).strip()
+        elif key == "policy_changed":
+            result[key] = match.group(1).strip() == "yes"
+        elif key in {"policy_path", "apply_decision", "applied_policy"}:
+            result[key] = match.group(1).strip()
+        else:
+            result[key] = float(match.group(1))
+    return result
+
+
+def _format_ingest_policy_notification(summary, *, policy_changed: bool):
+    if not summary:
+        return f"Ingest policy optimize finished.\n• Policy changed: {'yes' if policy_changed else 'no'}"
+    lines = ["Ingest policy optimize finished."]
+    if summary.get("baseline") is not None and summary.get("best") is not None:
+        lines.append(f"• Score: {summary['baseline']:.2f} -> {summary['best']:.2f}")
+    if summary.get("delta") is not None:
+        lines.append(f"• Delta: {summary['delta']:+.2f}")
+    if summary.get("min_improvement") is not None:
+        lines.append(f"• Min improvement: {summary['min_improvement']:.2f}")
+    lines.append(f"• Policy changed: {'yes' if policy_changed else 'no'}")
+    if summary.get("apply_decision"):
+        lines.append(f"• Apply decision: {summary['apply_decision']}")
     return "\n".join(lines)
 
 
@@ -277,6 +337,104 @@ def _format_report_optimize_notification(summary, *, policy_changed: bool):
     return "\n".join(lines)
 
 
+def _parse_runtime_llm_summary(log_text):
+    text = str(log_text or "")
+    result = {}
+    patterns = {
+        "llm_calls": r"RUN_LLM_CALLS=(\d+)",
+        "prompt_tokens": r"RUN_PROMPT_TOKENS=(\d+)",
+        "completion_tokens": r"RUN_COMPLETION_TOKENS=(\d+)",
+        "cached_prompt_tokens": r"RUN_CACHED_PROMPT_TOKENS=(\d+)",
+        "reasoning_tokens": r"RUN_REASONING_TOKENS=(\d+)",
+        "total_tokens": r"RUN_TOTAL_TOKENS=(\d+)",
+        "llm_cost_usd": r"RUN_LLM_COST_USD=(-?\d+\.\d+)",
+        "unpriced_calls": r"RUN_UNPRICED_CALLS=(\d+)",
+        "unpriced_models": r"RUN_UNPRICED_MODELS=(\[.+\])",
+    }
+    for key, pattern in patterns.items():
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        if key == "unpriced_models":
+            try:
+                result[key] = json.loads(match.group(1))
+            except json.JSONDecodeError:
+                result[key] = []
+        elif key in {"llm_cost_usd"}:
+            result[key] = float(match.group(1))
+        else:
+            result[key] = int(match.group(1))
+    return result
+
+
+def _parse_autoresearch_hourly_summary(log_text):
+    text = str(log_text or "")
+    result = {}
+    patterns = {
+        "status": r"AUTORESEARCH_STATUS=([a-z_]+)",
+        "failed_step": r"failed_step=([a-z_]+)",
+        "total_duration_seconds": r"AUTORESEARCH_TOTAL_DURATION_SECONDS=(-?\d+\.\d+)",
+        "llm_cost_usd": r"AUTORESEARCH_TOTAL_COST_USD=(-?\d+\.\d+)",
+        "ingest_policy_delta": r"ingest_policy_delta=(-?\d+\.\d+)",
+        "detect_eval_score": r"detect_eval_score=(\d+\.\d+)",
+        "detect_policy_delta": r"detect_policy_delta=(-?\d+\.\d+)",
+        "report_eval_score": r"report_eval_score=(\d+\.\d+)",
+        "report_policy_delta": r"report_policy_delta=(-?\d+\.\d+)",
+        "report_policy_apply_decision": r"report_policy_apply_decision=([a-z_]+)",
+        "ingest_policy_optimize_duration_seconds": r"ingest_policy_optimize_duration_seconds=(-?\d+\.\d+)",
+        "detect_policy_eval_duration_seconds": r"detect_policy_eval_duration_seconds=(-?\d+\.\d+)",
+        "detect_policy_optimize_duration_seconds": r"detect_policy_optimize_duration_seconds=(-?\d+\.\d+)",
+        "report_policy_eval_duration_seconds": r"report_policy_eval_duration_seconds=(-?\d+\.\d+)",
+        "report_policy_optimize_duration_seconds": r"report_policy_optimize_duration_seconds=(-?\d+\.\d+)",
+    }
+    for key, pattern in patterns.items():
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        if key in {"status", "failed_step", "report_policy_apply_decision"}:
+            result[key] = match.group(1).strip()
+        else:
+            result[key] = float(match.group(1))
+    return result
+
+
+def _format_autoresearch_hourly_notification(summary):
+    if not summary:
+        return "Autoresearch hourly finished."
+    lines = ["Autoresearch hourly finished."]
+    if summary.get("total_duration_seconds") is not None:
+        lines.append(f"• Runtime: {format_duration(summary['total_duration_seconds'])}")
+    if summary.get("llm_cost_usd") is not None:
+        lines.append(f"• LLM cost: ${summary['llm_cost_usd']:.4f}")
+    if summary.get("detect_eval_score") is not None:
+        lines.append(f"• Detect eval: {summary['detect_eval_score']:.2f}")
+    if summary.get("detect_policy_delta") is not None:
+        lines.append(f"• Detect policy delta: {summary['detect_policy_delta']:+.2f}")
+    if summary.get("report_eval_score") is not None:
+        lines.append(f"• Report eval: {summary['report_eval_score']:.2f}")
+    if summary.get("report_policy_delta") is not None:
+        lines.append(f"• Report policy delta: {summary['report_policy_delta']:+.2f}")
+    if summary.get("report_policy_apply_decision"):
+        lines.append(f"• Report apply decision: {summary['report_policy_apply_decision']}")
+    if summary.get("ingest_policy_delta") is not None:
+        lines.append(f"• Ingest policy delta: {summary['ingest_policy_delta']:+.2f}")
+    component_durations = []
+    component_labels = {
+        "ingest_policy_optimize_duration_seconds": "ingest",
+        "detect_policy_eval_duration_seconds": "detect eval",
+        "detect_policy_optimize_duration_seconds": "detect tune",
+        "report_policy_eval_duration_seconds": "report eval",
+        "report_policy_optimize_duration_seconds": "report tune",
+    }
+    for key, label in component_labels.items():
+        if summary.get(key) is None:
+            continue
+        component_durations.append(f"{label} {format_duration(summary[key])}")
+    if component_durations:
+        lines.append("• Step runtimes: " + " | ".join(component_durations))
+    return "\n".join(lines)
+
+
 def _parse_optimize_summary(log_text):
     text = str(log_text or "")
     result = {}
@@ -327,6 +485,14 @@ def _load_policy_text():
 
 def _load_report_policy_text():
     policy_path = ROOT / "report_policy_config.json"
+    try:
+        return policy_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+
+
+def _load_ingest_policy_text():
+    policy_path = get_ingest_policy_path()
     try:
         return policy_path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -387,6 +553,15 @@ def _notify_step_completion(step, run_meta, state):
         baseline = run_meta.get("baseline") or {}
         candidates = _load_new_detect_candidates(baseline.get("max_trend_candidate_id", 0))
         message = _format_detect_candidates_notification(candidates)
+    elif step == "autoresearch_hourly":
+        message = _format_autoresearch_hourly_notification(_parse_autoresearch_hourly_summary(_read_log_text(run_meta.get("log_path"))))
+    elif step == "ingest_policy_optimize":
+        before_policy = run_meta.get("ingest_policy_before", "")
+        after_policy = _load_ingest_policy_text()
+        message = _format_ingest_policy_notification(
+            _parse_ingest_policy_summary(_read_log_text(run_meta.get("log_path"))),
+            policy_changed=before_policy != after_policy,
+        )
     elif step == "report_policy_eval":
         message = _format_report_eval_notification(_parse_report_eval_summary(_read_log_text(run_meta.get("log_path"))))
     elif step == "report_policy_benchmark":
@@ -418,6 +593,10 @@ def _notify_step_completion(step, run_meta, state):
     if not message:
         return
 
+    duration_seconds = state.get("duration_seconds")
+    if duration_seconds is not None:
+        message += f"\n• Runtime: {format_duration(duration_seconds)}"
+
     try:
         _discord_notify(message)
     except Exception:
@@ -444,8 +623,120 @@ def _read_log_tail(log_path, max_chars=2000):
     return tail
 
 
-def _utc_now_iso():
-    return datetime.now(UTC).isoformat()
+def _connect_runtime_db():
+    conninfo, _reason = resolve_database_conninfo()
+    if not conninfo:
+        return None
+    return psycopg.connect(conninfo)
+
+
+def _summarize_step_log(step, run_meta):
+    log_text = _read_log_text(run_meta.get("log_path"))
+    summary = _parse_runtime_llm_summary(log_text)
+    if step == "autoresearch_hourly":
+        summary.update(_parse_autoresearch_hourly_summary(log_text))
+        return summary
+    if step == "ingest_policy_optimize":
+        summary.update(_parse_ingest_policy_summary(log_text))
+        return summary
+    if step == "report_policy_eval":
+        summary.update(_parse_report_eval_summary(log_text))
+        return summary
+    if step == "report_policy_benchmark":
+        summary.update(_parse_report_benchmark_summary(log_text))
+        return summary
+    if step == "report_policy_optimize":
+        summary.update(_parse_report_benchmark_summary(log_text))
+        return summary
+    if step == "detect_policy_eval":
+        summary.update(_parse_eval_summary(log_text))
+        return summary
+    if step == "detect_policy_optimize":
+        summary.update(_parse_optimize_summary(log_text))
+        return summary
+    return summary
+
+
+def _fetch_recent_pipeline_runs(cur, *, limit=40):
+    cur.execute(
+        """
+        SELECT
+            id,
+            step,
+            status,
+            trigger_source,
+            parent_run_id,
+            started_at,
+            finished_at,
+            duration_seconds,
+            exit_code,
+            llm_calls,
+            llm_prompt_tokens,
+            llm_completion_tokens,
+            llm_cached_prompt_tokens,
+            llm_reasoning_tokens,
+            llm_total_tokens,
+            llm_cost_usd,
+            summary
+        FROM pipeline_runs
+        ORDER BY started_at DESC, id DESC
+        LIMIT %s
+        """,
+        (int(limit),),
+    )
+    runs = []
+    for row in cur.fetchall():
+        summary = row[16] if isinstance(row[16], dict) else {}
+        runs.append(
+            {
+                "id": row[0],
+                "step": row[1],
+                "status": row[2],
+                "trigger_source": row[3],
+                "parent_run_id": row[4],
+                "started_at": row[5].isoformat() if row[5] else None,
+                "finished_at": row[6].isoformat() if row[6] else None,
+                "duration_seconds": round(float(row[7]), 3) if row[7] is not None else None,
+                "duration_human": format_duration(row[7]) if row[7] is not None else None,
+                "exit_code": row[8],
+                "llm_calls": int(row[9] or 0),
+                "llm_prompt_tokens": int(row[10] or 0),
+                "llm_completion_tokens": int(row[11] or 0),
+                "llm_cached_prompt_tokens": int(row[12] or 0),
+                "llm_reasoning_tokens": int(row[13] or 0),
+                "llm_total_tokens": int(row[14] or 0),
+                "llm_cost_usd": round(float(row[15] or 0.0), 6),
+                "summary": summary,
+            }
+        )
+    return runs
+
+
+def _merge_persisted_step_runs(snapshot, recent_runs):
+    merged = {key: dict(value) for key, value in snapshot.items()}
+    latest_by_step = {}
+    for run in recent_runs:
+        latest_by_step.setdefault(run["step"], run)
+
+    for step, run in latest_by_step.items():
+        if step not in merged:
+            continue
+        current = merged[step]
+        if (current.get("status") or "").lower() == "running":
+            continue
+        current.update(
+            {
+                "status": run.get("status") or current.get("status"),
+                "started_at": run.get("started_at") or current.get("started_at"),
+                "finished_at": run.get("finished_at") or current.get("finished_at"),
+                "duration_seconds": run.get("duration_seconds"),
+                "duration_human": run.get("duration_human"),
+                "exit_code": run.get("exit_code"),
+            }
+        )
+        if not current.get("log_tail") and run.get("summary"):
+            current["log_tail"] = json.dumps(run["summary"], indent=2, sort_keys=True)
+    return merged
 
 
 def _refresh_step_runs():
@@ -458,8 +749,13 @@ def _refresh_step_runs():
                 continue
             _active_processes.pop(step, None)
             state = _step_runs[step]
+            finished_at = utc_now()
+            started_at = run_meta.get("started_at") or finished_at
+            duration_seconds = max(0.0, (finished_at - started_at).total_seconds())
             state["status"] = "success" if proc.returncode == 0 else "failed"
-            state["finished_at"] = _utc_now_iso()
+            state["finished_at"] = finished_at.isoformat()
+            state["duration_seconds"] = round(duration_seconds, 3)
+            state["duration_human"] = format_duration(duration_seconds)
             state["exit_code"] = proc.returncode
 
             log_file = run_meta.get("log_file")
@@ -469,6 +765,21 @@ def _refresh_step_runs():
             except Exception:
                 pass
             state["log_tail"] = _read_log_tail(log_path)
+            db_run = run_meta.get("db_run")
+            if db_run is not None:
+                try:
+                    with _connect_runtime_db() as conn:
+                        finish_run(
+                            conn,
+                            run=db_run,
+                            status=state["status"],
+                            finished_at=finished_at,
+                            exit_code=proc.returncode,
+                            summary=_summarize_step_log(step, run_meta),
+                        )
+                        conn.commit()
+                except Exception:
+                    pass
             _notify_step_completion(step, run_meta, state)
 
 
@@ -487,17 +798,37 @@ def _start_step_run(step):
 
         log_file = tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", delete=False)
         cmd = RUN_COMMANDS[step]
-        run_meta = {"log_file": log_file, "log_path": log_file.name}
+        started_at = utc_now()
+        run_meta = {"log_file": log_file, "log_path": log_file.name, "started_at": started_at}
         if step == "detect":
             run_meta["baseline"] = _load_detect_baseline()
+        elif step == "ingest_policy_optimize":
+            run_meta["ingest_policy_before"] = _load_ingest_policy_text()
         elif step in {"report_policy_benchmark", "report_policy_optimize"}:
             run_meta["report_policy_before"] = _load_report_policy_text()
         elif step == "detect_policy_optimize":
             run_meta["policy_before"] = _load_policy_text()
+        try:
+            conn = _connect_runtime_db()
+            if conn is not None:
+                with conn:
+                    run_meta["db_run"] = start_run(
+                        conn,
+                        step=step,
+                        trigger_source="dashboard",
+                        started_at=started_at,
+                    )
+                    conn.commit()
+        except Exception:
+            pass
         proc = subprocess.Popen(
             cmd,
             cwd=ROOT,
-            env=os.environ.copy(),
+            env={
+                **os.environ.copy(),
+                "PIPELINE_DISABLE_SELF_LOGGING": "1",
+                "PIPELINE_TRIGGER_SOURCE": "dashboard",
+            },
             stdout=log_file,
             stderr=subprocess.STDOUT,
             text=True,
@@ -506,8 +837,10 @@ def _start_step_run(step):
         _active_processes[step] = run_meta
         _step_runs[step] = {
             "status": "running",
-            "started_at": _utc_now_iso(),
+            "started_at": started_at.isoformat(),
             "finished_at": None,
+            "duration_seconds": None,
+            "duration_human": None,
             "exit_code": None,
             "log_tail": "",
         }
@@ -613,6 +946,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             with conn.cursor() as cur:
                 self._ensure_sources_metadata_columns(cur)
                 self._ensure_trend_candidate_scoring_columns(cur)
+                ensure_pipeline_runs_table(conn)
 
                 # ── Ingest: include extraction metadata ──
                 cur.execute(
@@ -829,6 +1163,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     """
                 )
                 state = {row[0]: row[1] for row in cur.fetchall()}
+                recent_pipeline_runs = _fetch_recent_pipeline_runs(cur)
+                step_runs = _merge_persisted_step_runs(_step_runs_snapshot(), recent_pipeline_runs)
 
                 # ── Logs ──
                 cur.execute(
@@ -875,6 +1211,14 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             {"label": "Reports", "value": str(reports_count)},
             {"label": "Last ingest", "value": state.get("last_ingest_completed_at", "Unknown")},
             {"label": "New sources (last ingest)", "value": state.get("last_ingest_new_sources", "Unknown")},
+            {
+                "label": "Last autoresearch runtime",
+                "value": state.get("last_autoresearch_hourly_run_duration_human", "Unknown"),
+            },
+            {
+                "label": "Last autoresearch status",
+                "value": state.get("last_autoresearch_hourly_run_status", "Unknown"),
+            },
             {"label": "Generated at", "value": now.isoformat()},
         ]
 
@@ -885,12 +1229,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             "reports": report_items,
             "patterns": pattern_items,
             "status": status_items,
-            "step_runs": _step_runs_snapshot(),
+            "step_runs": step_runs,
             "debug": {
                 "extraction_breakdown": extraction_breakdown,
                 "source_type_breakdown": source_type_breakdown,
                 "avg_content_length": avg_content_length,
                 "pipeline_state": state,
+                "recent_pipeline_runs": recent_pipeline_runs,
                 "counts": {
                     "sources": sources_count,
                     "chunks": chunks_count,

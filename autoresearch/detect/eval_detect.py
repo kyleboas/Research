@@ -5,11 +5,11 @@ import argparse
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from autoresearch_detect.evaluator import evaluate_items, load_fixture
+from autoresearch.detect.evaluator import evaluate_items, load_fixture
 from detect_policy import get_policy_path, load_policy
 
 DEFAULT_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "candidates.json"

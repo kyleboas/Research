@@ -6,7 +6,7 @@ Architecture mirrors Anthropic's production research system:
   → Synthesis → Sufficiency evaluation → optional re-plan → CitationAgent → Revision
 """
 
-import argparse, base64, hashlib, json, logging, math, os, platform, random, re, socket, time
+import argparse, base64, hashlib, json, logging, math, os, random, re, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 from http.cookiejar import CookieJar
@@ -45,18 +45,17 @@ from trend_detection import run_bertrend_detection, describe_signals_with_llm
 from article_extractor import extract_article, should_extract
 from tactical_extraction import chunk_with_context, extract_tactical_patterns, extract_tactical_context
 from novelty_scoring import update_baseline
+from ingest_policy import load_policy as load_ingest_policy
 from report_policy import load_policy as load_report_policy
+from runtime_logging import finish_run, llm_usage_tracking, record_llm_usage, start_run, utc_now
 
 log = logging.getLogger("research")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
-TRANSCRIPT_KEY = os.environ.get("TRANSCRIPT_API_KEY", "")
 NEWSBLUR_USERNAME = os.environ.get("NEWSBLUR_USERNAME", "")
 NEWSBLUR_PASSWORD = os.environ.get("NEWSBLUR_PASSWORD", "")
-RSS_OVERLAP_SECONDS = max(0, int(os.environ.get("RSS_OVERLAP_SECONDS", str(48 * 60 * 60))))
-YOUTUBE_OVERLAP_SECONDS = max(0, int(os.environ.get("YOUTUBE_OVERLAP_SECONDS", str(48 * 60 * 60))))
 
 # ── Cloudflare AI Gateway ──────────────────────────────────────────────────────
 CLOUDFLARE_GATEWAY_URL = os.environ.get("CLOUDFLARE_GATEWAY_URL", "")
@@ -72,6 +71,15 @@ DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
 # ── Config file (config.json) overrides env-var model defaults ────────────────
 _cfg_path = ROOT / "config.json"
 _CFG: dict = json.loads(_cfg_path.read_text()) if _cfg_path.exists() else {}
+INGEST_POLICY = load_ingest_policy()
+RSS_OVERLAP_SECONDS = max(
+    0,
+    int(os.environ.get("RSS_OVERLAP_SECONDS", str(int(INGEST_POLICY["rss_overlap_seconds"])))),
+)
+YOUTUBE_OVERLAP_SECONDS = max(
+    0,
+    int(os.environ.get("YOUTUBE_OVERLAP_SECONDS", str(int(INGEST_POLICY["youtube_overlap_seconds"])))),
+)
 REPORT_POLICY = load_report_policy()
 MAX_RESEARCH_ROUNDS = int(REPORT_POLICY["max_research_rounds"])
 
@@ -98,12 +106,12 @@ EVAL_MODEL      = os.environ.get("EVAL_MODEL")      or _CFG.get("eval_model",   
 def _validate_required_env(step: str):
     common_required = ["CLOUDFLARE_GATEWAY_URL", "CLOUDFLARE_GATEWAY_TOKEN"]
     step_required = {
-        "ingest": common_required + ["NEWSBLUR_USERNAME", "NEWSBLUR_PASSWORD", "TRANSCRIPT_API_KEY"],
+        "ingest": common_required + ["NEWSBLUR_USERNAME", "NEWSBLUR_PASSWORD"],
         "backfill": common_required,
         "detect": common_required,
         "rescore": common_required,
         "report": common_required,
-        "all": common_required + ["NEWSBLUR_USERNAME", "NEWSBLUR_PASSWORD", "TRANSCRIPT_API_KEY"],
+        "all": common_required + ["NEWSBLUR_USERNAME", "NEWSBLUR_PASSWORD"],
     }
     missing = [name for name in step_required.get(step, []) if not os.environ.get(name)]
     if missing:
@@ -261,7 +269,9 @@ def _chat_completion_create(*, model: str, max_tokens: int, messages: list[dict]
         return client.chat.completions.create(**minimal)
 
     try:
-        return _call_with_bad_format_retries(kwargs)
+        response = _call_with_bad_format_retries(kwargs)
+        record_llm_usage(response, model_name=model_name, operation="chat")
+        return response
     except openai.AuthenticationError:
         _log_auth_hint_for_model(model_name)
         raise
@@ -647,63 +657,12 @@ def fetch_newsblur(since_ts=None):
 # YouTube ingestion
 # ══════════════════════════════════════════════
 
-TRANSCRIPT_API_BASE_URL = "https://transcriptapi.com/api/v2"
+DEFUDDLE_BASE_URL = "https://defuddle.md/"
 RETRYABLE_HTTP_STATUSES = {408, 429, 503}
 NON_RETRYABLE_HTTP_STATUSES = {400, 401, 402, 403, 404, 422}
 YOUTUBE_RSS_BASE_URL = "https://www.youtube.com/feeds/videos.xml"
-TRANSCRIPT_API_USER_AGENT = "ResearchBot/1.0"
+DEFUDDLE_USER_AGENT = "ResearchBot/1.0"
 YOUTUBE_RSS_USER_AGENT = "ResearchBot/1.0"
-
-_OUTBOUND_IP_CACHE = None
-
-
-class TranscriptApiHardDeny(Exception):
-    """TranscriptAPI returned a hard deny that should never be retried."""
-
-
-def _host_container_metadata():
-    return {
-        "hostname": socket.gethostname(),
-        "platform": platform.platform(),
-        "container_id": os.environ.get("HOSTNAME", ""),
-    }
-
-
-def _get_outbound_ip():
-    global _OUTBOUND_IP_CACHE
-    if _OUTBOUND_IP_CACHE is not None:
-        return _OUTBOUND_IP_CACHE
-
-    try:
-        req = Request("https://api64.ipify.org?format=json", headers={"User-Agent": TRANSCRIPT_API_USER_AGENT})
-        with urlopen(req, timeout=3) as response:
-            payload = json.loads(response.read())
-        _OUTBOUND_IP_CACHE = str(payload.get("ip") or "unknown")
-    except Exception:
-        _OUTBOUND_IP_CACHE = "unknown"
-    return _OUTBOUND_IP_CACHE
-
-
-def _is_hard_deny(status, body):
-    if status != 403:
-        return False
-    normalized = (body or "").lower()
-    return (
-        "error_code=1010" in normalized
-        or '"error_code":1010' in normalized
-        or '"error_code": 1010' in normalized
-        or "retryable=false" in normalized
-        or '"retryable":false' in normalized
-        or '"retryable": false' in normalized
-    )
-
-
-def _write_support_packet(payload):
-    out_dir = ROOT / "logs"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    packet_file = out_dir / "transcriptapi_support.jsonl"
-    with packet_file.open("a", encoding="utf-8") as fp:
-        fp.write(json.dumps(payload, separators=(",", ":"), ensure_ascii=False) + "\n")
 
 
 def _http_error_details(err):
@@ -720,71 +679,40 @@ def _http_error_details(err):
     return body, headers
 
 
-def _transcriptapi_get(path, params):
-    url = f"{TRANSCRIPT_API_BASE_URL}{path}?{urlencode(params)}"
-    request_headers = {
-        "Authorization": f"Bearer {TRANSCRIPT_KEY}",
-        "Accept": "application/json",
-        "User-Agent": TRANSCRIPT_API_USER_AGENT,
-    }
-    req = Request(
-        url,
-        headers=request_headers,
-    )
-
+def _http_get_text(url, *, headers=None, label="HTTP request"):
+    request_headers = {"User-Agent": DEFUDDLE_USER_AGENT}
+    if headers:
+        request_headers.update(headers)
+    req = Request(url, headers=request_headers)
     max_attempts = 4
     for attempt in range(1, max_attempts + 1):
         try:
             with urlopen(req, timeout=30) as response:
-                return json.loads(response.read())
+                return response.read().decode("utf-8", errors="replace")
         except HTTPError as e:
             status = int(e.code)
-            body, headers = _http_error_details(e)
-            timestamp = datetime.now(UTC).isoformat()
-            if _is_hard_deny(status, body):
-                support_payload = {
-                    "classification": "HARD_DENY/NON_RETRYABLE",
-                    "ray_id": headers.get("CF-RAY") or headers.get("cf-ray") or "",
-                    "timestamp": timestamp,
-                    "endpoint": path,
-                    "request_params": params,
-                    "response_body": body[:3000],
-                    "user_agent": request_headers.get("User-Agent"),
-                    "host_container_metadata": _host_container_metadata(),
-                }
-                _write_support_packet(support_payload)
-                log.error(
-                    "TranscriptAPI hard deny classification=HARD_DENY/NON_RETRYABLE ray_id=%s timestamp=%s endpoint=%s channel_id=%s outbound_ip=%s user_agent=%s",
-                    support_payload["ray_id"],
-                    timestamp,
-                    path,
-                    params.get("channel_id") or params.get("channel") or "",
-                    _get_outbound_ip(),
-                    support_payload["user_agent"],
-                )
-                raise TranscriptApiHardDeny("TranscriptAPI hard deny")
-
+            body, response_headers = _http_error_details(e)
             if status in RETRYABLE_HTTP_STATUSES and attempt < max_attempts:
                 delay = min(8.0, 0.5 * (2 ** (attempt - 1))) + random.uniform(0, 0.2)
                 log.warning(
-                    "TranscriptAPI retryable failure path=%s status=%s attempt=%s/%s; retrying in %.2fs",
-                    path,
+                    "%s retryable failure status=%s attempt=%s/%s url=%s; retrying in %.2fs",
+                    label,
                     status,
                     attempt,
                     max_attempts,
+                    url,
                     delay,
                 )
                 time.sleep(delay)
                 continue
 
-            # Log full details for non-retryable and undocumented errors.
             level = log.warning if status in NON_RETRYABLE_HTTP_STATUSES else log.error
             level(
-                "TranscriptAPI request failed path=%s status=%s params=%s headers=%s body=%s",
-                path,
+                "%s failed status=%s url=%s headers=%s body=%s",
+                label,
                 status,
-                params,
-                headers,
+                url,
+                response_headers,
                 body[:3000],
             )
             raise
@@ -818,14 +746,64 @@ def _youtube_rss_latest_videos(channel_id, limit=None):
     return videos
 
 
-def _extract_transcript_text(data):
-    for key in ("transcript", "text", "content"):
-        value = data.get(key)
-        if isinstance(value, str):
-            return value
-        if isinstance(value, list):
-            return " ".join(p.get("text", "") for p in value if isinstance(p, dict))
-    return ""
+def _parse_markdown_frontmatter(markdown):
+    if not markdown.startswith("---\n"):
+        return {}, markdown
+    end = markdown.find("\n---\n", 4)
+    if end == -1:
+        return {}, markdown
+    metadata = {}
+    for raw_line in markdown[4:end].splitlines():
+        if ":" not in raw_line:
+            continue
+        key, value = raw_line.split(":", 1)
+        cleaned = value.strip()
+        if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {"'", '"'}:
+            cleaned = cleaned[1:-1]
+        metadata[key.strip()] = cleaned
+    return metadata, markdown[end + len("\n---\n") :]
+
+
+def _clean_markdown_transcript(text):
+    cleaned = str(text or "")
+    cleaned = re.sub(r"!\[[^\]]*\]\([^)]+\)", " ", cleaned)
+    cleaned = re.sub(r"^\*\*\d{1,2}:\d{2}(?::\d{2})?\*\*\s*[·-]?\s*", "", cleaned, flags=re.M)
+    cleaned = cleaned.replace("\\[", "[").replace("\\]", "]")
+    cleaned = re.sub(r"\[(.*?)\]\([^)]+\)", r"\1", cleaned)
+    cleaned = re.sub(r"\*\*(.*?)\*\*", r"\1", cleaned)
+    cleaned = re.sub(r"__(.*?)__", r"\1", cleaned)
+    cleaned = re.sub(r"`([^`]*)`", r"\1", cleaned)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def _extract_youtube_transcript_from_markdown(markdown):
+    metadata, body = _parse_markdown_frontmatter(markdown)
+    match = re.search(r"^##\s+Transcript\s*$", body, re.M)
+    transcript_body = body[match.end() :] if match else body
+    next_heading = re.search(r"^##\s+", transcript_body, re.M)
+    if next_heading:
+        transcript_body = transcript_body[: next_heading.start()]
+    return {
+        "title": str(metadata.get("title") or "").strip(),
+        "transcript": _clean_markdown_transcript(transcript_body),
+    }
+
+
+def _defuddle_markdown_url(source_url):
+    cleaned = str(source_url or "").strip()
+    return f"{DEFUDDLE_BASE_URL}{quote(cleaned, safe=':/?&=#')}"
+
+
+def _fetch_youtube_transcript(video_id):
+    video_url = f"https://www.youtube.com/watch?v={video_id}"
+    markdown = _http_get_text(
+        _defuddle_markdown_url(video_url),
+        headers={"Accept": "text/markdown", "User-Agent": DEFUDDLE_USER_AGENT},
+        label="defuddle transcript fetch",
+    )
+    return _extract_youtube_transcript_from_markdown(markdown)
 
 
 def _extract_uc_channel_id(raw):
@@ -950,10 +928,6 @@ def fetch_youtube(name, channel_id, published_after=None):
     try:
         videos = _youtube_rss_latest_videos(resolved_channel_id)
         counters["youtube_discovery_successes"] += 1
-    except TranscriptApiHardDeny:
-        counters["youtube_discovery_hard_denies"] += 1
-        log.warning("YouTube discovery hard-denied for %s (%s)", name, resolved_channel_id)
-        return [], True, counters, None
     except HTTPError as e:
         if int(e.code) in RETRYABLE_HTTP_STATUSES:
             counters["youtube_discovery_retryable_failures"] += 1
@@ -994,23 +968,11 @@ def fetch_youtube(name, channel_id, published_after=None):
             continue
         title = _video_title(video)
         try:
-            transcript_data = _transcriptapi_get(
-                "/youtube/transcript",
-                {
-                    "video_url": vid,
-                    "format": "text",
-                    "include_timestamp": "false",
-                    "send_metadata": "true",
-                },
-            )
-            transcript = _extract_transcript_text(transcript_data)
+            transcript_data = _fetch_youtube_transcript(vid)
+            transcript = str(transcript_data.get("transcript") or "").strip()
         except HTTPError as e:
             log.warning("Transcript %s failed for channel=%s title=%r status=%s", vid, name, title, e.code)
             counters["youtube_transcript_failures"] += 1
-            continue
-        except TranscriptApiHardDeny:
-            counters["youtube_transcript_failures"] += 1
-            log.warning("Transcript %s hard-denied for channel=%s title=%r", vid, name, title)
             continue
         except Exception as e:
             log.warning("Transcript %s failed for channel=%s title=%r: %s", vid, name, title, e)
@@ -1134,6 +1096,7 @@ def embed(texts):
     for attempt in range(1, max_attempts + 1):
         try:
             resp = client.embeddings.create(model=_resolved_embed_model, input=cleaned_inputs)
+            record_llm_usage(resp, model_name=_resolved_embed_model, operation="embedding")
             dense = [None] * total_inputs
             for source_idx, embedding_obj in zip(index_map, resp.data):
                 dense[source_idx] = embedding_obj.embedding
@@ -2957,6 +2920,29 @@ def run_rescore(conn, *, limit: int = 0, batch_size: int = 100, statuses: list[s
     )
 
 
+def _runtime_summary_payload(*, llm_usage: dict) -> dict:
+    return {
+        "llm_usage": llm_usage,
+    }
+
+
+def _emit_runtime_summary(step: str, summary: dict | None) -> None:
+    llm_usage = ((summary or {}).get("llm_usage") or {}) if isinstance(summary, dict) else {}
+    print(f"RUN_STEP={step}")
+    print(f"RUN_LLM_CALLS={int(llm_usage.get('llm_calls', 0) or 0)}")
+    print(f"RUN_PROMPT_TOKENS={int(llm_usage.get('prompt_tokens', 0) or 0)}")
+    print(f"RUN_COMPLETION_TOKENS={int(llm_usage.get('completion_tokens', 0) or 0)}")
+    print(f"RUN_CACHED_PROMPT_TOKENS={int(llm_usage.get('cached_prompt_tokens', 0) or 0)}")
+    print(f"RUN_REASONING_TOKENS={int(llm_usage.get('reasoning_tokens', 0) or 0)}")
+    print(f"RUN_TOTAL_TOKENS={int(llm_usage.get('total_tokens', 0) or 0)}")
+    print(f"RUN_LLM_COST_USD={float(llm_usage.get('llm_cost_usd', 0.0) or 0.0):.6f}")
+    print(f"RUN_UNPRICED_CALLS={int(llm_usage.get('unpriced_calls', 0) or 0)}")
+    print(
+        "RUN_UNPRICED_MODELS="
+        + json.dumps(sorted(llm_usage.get("unpriced_models") or []), ensure_ascii=False)
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Football research pipeline")
     parser.add_argument(
@@ -2980,8 +2966,8 @@ def main():
     parser.add_argument(
         "--min-new-sources-for-detect",
         type=int,
-        default=0,
-        help="Skip detect when latest ingest inserted fewer than this many new sources (default: 0)",
+        default=int(INGEST_POLICY.get("detect_min_new_sources", 0)),
+        help="Skip detect when latest ingest inserted fewer than this many new sources (default: ingest_policy_config.json value)",
     )
     parser.add_argument(
         "--rescore-limit",
@@ -3010,43 +2996,92 @@ def main():
     _validate_required_env(args.step)
 
     conn = _connect_db()
+    started_at = utc_now()
+    db_run = None
+    self_logging_enabled = (os.environ.get("PIPELINE_DISABLE_SELF_LOGGING", "").strip().lower() not in {"1", "true", "yes"})
+    parent_run_id_raw = (os.environ.get("PIPELINE_PARENT_RUN_ID") or "").strip()
+    parent_run_id = int(parent_run_id_raw) if parent_run_id_raw.isdigit() else None
+    trigger_source = (os.environ.get("PIPELINE_TRIGGER_SOURCE") or "cli").strip() or "cli"
+    llm_usage = {}
+    usage_tracker = None
     try:
         _ensure_schema(conn)
-        if args.step == "ingest":
-            run_ingest(conn)
-        elif args.step == "backfill":
-            run_backfill(conn, lookback_days=args.backfill_days, limit=args.backfill_limit)
-        elif args.step == "detect":
-            run_detect(
+        if self_logging_enabled:
+            db_run = start_run(
                 conn,
-                min_new_sources=args.min_new_sources_for_detect,
-                backfill_days=args.backfill_days,
-                backfill_limit=args.backfill_limit,
+                step=args.step,
+                trigger_source=trigger_source,
+                parent_run_id=parent_run_id,
+                started_at=started_at,
             )
-        elif args.step == "rescore":
-            run_rescore(
-                conn,
-                limit=args.rescore_limit,
-                batch_size=args.rescore_batch_size,
-                statuses=_parse_rescore_statuses(args.rescore_statuses),
-            )
-        elif args.step == "report":
-            run_report(conn)
-        else:
-            run_ingest(conn)
-            run_detect(
-                conn,
-                min_new_sources=args.min_new_sources_for_detect,
-                backfill_days=args.backfill_days,
-                backfill_limit=args.backfill_limit,
-            )
-            if args.allow_report_after_detect:
+            conn.commit()
+
+        with llm_usage_tracking() as usage_tracker:
+            if args.step == "ingest":
+                run_ingest(conn)
+            elif args.step == "backfill":
+                run_backfill(conn, lookback_days=args.backfill_days, limit=args.backfill_limit)
+            elif args.step == "detect":
+                run_detect(
+                    conn,
+                    min_new_sources=args.min_new_sources_for_detect,
+                    backfill_days=args.backfill_days,
+                    backfill_limit=args.backfill_limit,
+                )
+            elif args.step == "rescore":
+                run_rescore(
+                    conn,
+                    limit=args.rescore_limit,
+                    batch_size=args.rescore_batch_size,
+                    statuses=_parse_rescore_statuses(args.rescore_statuses),
+                )
+            elif args.step == "report":
                 run_report(conn)
             else:
-                log.info(
-                    "Step 'all' now runs ingest+detect only. "
-                    "Use --allow-report-after-detect to run report in the same process."
+                run_ingest(conn)
+                run_detect(
+                    conn,
+                    min_new_sources=args.min_new_sources_for_detect,
+                    backfill_days=args.backfill_days,
+                    backfill_limit=args.backfill_limit,
                 )
+                if args.allow_report_after_detect:
+                    run_report(conn)
+                else:
+                    log.info(
+                        "Step 'all' now runs ingest+detect only. "
+                        "Use --allow-report-after-detect to run report in the same process."
+                    )
+            llm_usage = usage_tracker.summary()
+            summary = _runtime_summary_payload(llm_usage=llm_usage)
+            _emit_runtime_summary(args.step, summary)
+            if db_run is not None:
+                finish_run(
+                    conn,
+                    run=db_run,
+                    status="success",
+                    finished_at=utc_now(),
+                    exit_code=0,
+                    summary=summary,
+                )
+                conn.commit()
+    except BaseException as exc:
+        if usage_tracker is not None:
+            llm_usage = usage_tracker.summary()
+        summary = _runtime_summary_payload(llm_usage=llm_usage)
+        _emit_runtime_summary(args.step, summary)
+        if db_run is not None:
+            exit_code = exc.code if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
+            finish_run(
+                conn,
+                run=db_run,
+                status="failed",
+                finished_at=utc_now(),
+                exit_code=exit_code,
+                summary=summary,
+            )
+            conn.commit()
+        raise
     finally:
         conn.close()
 

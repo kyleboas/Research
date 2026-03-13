@@ -755,6 +755,15 @@
           html += '</tbody></table>';
         }
 
+        if (Array.isArray(debug.recent_pipeline_runs) && debug.recent_pipeline_runs.length) {
+          html += '<h3 style="margin:16px 0 8px;font-size:0.95rem;color:var(--subtext)">Recent Pipeline Runs</h3>';
+          html += '<table class="debug-table"><thead><tr><th>Step</th><th>Status</th><th>Runtime</th><th>Started</th><th>Trigger</th></tr></thead><tbody>';
+          debug.recent_pipeline_runs.forEach((run) => {
+            html += `<tr><td>${escapeHtml(run.step || 'unknown')}</td><td>${escapeHtml(run.status || 'unknown')}</td><td>${escapeHtml(run.duration_human || '—')}</td><td>${escapeHtml(formatIsoTime(run.started_at))}</td><td>${escapeHtml(run.trigger_source || 'manual')}</td></tr>`;
+          });
+          html += '</tbody></table>';
+        }
+
         html += '</div>';
         return html;
       };
@@ -770,6 +779,8 @@
         detect: "detect",
         rescore: "rescore historical trends",
         report: "report",
+        autoresearch_hourly: "autoresearch hourly",
+        ingest_policy_optimize: "ingest policy optimize",
         report_policy_eval: "report quality eval",
         report_policy_benchmark: "report policy benchmark",
         report_policy_optimize: "report policy optimize",
@@ -801,11 +812,14 @@
           { key: "report", label: "Next report" },
         ];
 
-        const runEntries = ["ingest", "detect", "rescore", "report", "report_policy_eval", "report_policy_benchmark", "report_policy_optimize", "detect_policy_eval", "detect_policy_optimize"].map((name) => ({
+        const runEntries = ["ingest", "detect", "rescore", "report", "autoresearch_hourly", "ingest_policy_optimize", "report_policy_eval", "report_policy_benchmark", "report_policy_optimize", "detect_policy_eval", "detect_policy_optimize"].map((name) => ({
           name,
           data: stepRuns?.[name] || { status: "idle" },
         }));
         const isAnyRunning = runEntries.some((entry) => (entry.data?.status || "").toLowerCase() === "running");
+        const mainSteps = ["ingest", "detect", "rescore", "report"];
+        const autoresearchSteps = ["autoresearch_hourly", "ingest_policy_optimize", "report_policy_eval", "report_policy_optimize", "detect_policy_eval", "detect_policy_optimize"];
+        const legacySteps = ["report_policy_benchmark"];
 
         const runtimeCards = items.length
           ? items
@@ -823,16 +837,27 @@
           )
           .join("")}${runtimeCards}
           <section class="status-card">
-            <p class="status-label">Manual runs</p>
-            <p class="status-subvalue">Run ingest, detect, rescore past trends, report, a report-quality eval, a report-policy benchmark, a report-policy optimize pass, a local detect-policy test, or an auto-tuning pass from the dashboard.</p>
+            <p class="status-label">Main pipeline</p>
+            <p class="status-subvalue">LLM-backed ingest, detect, rescore, and report generation.</p>
             <div class="run-controls">
-              ${["ingest", "detect", "rescore", "report", "report_policy_eval", "report_policy_benchmark", "report_policy_optimize", "detect_policy_eval", "detect_policy_optimize"].map((step) => `<button class="run-step-btn" data-run-step="${step}" ${isAnyRunning ? "disabled" : ""}>${step === "report_policy_eval" ? "Test report quality" : step === "report_policy_benchmark" ? "Benchmark report policy" : step === "report_policy_optimize" ? "Tune report policy" : step === "detect_policy_eval" ? "Test detect policy" : step === "detect_policy_optimize" ? "Tune detect policy" : step === "rescore" ? "Rescore past trends" : `Run ${step}`}</button>`).join("")}
+              ${mainSteps.map((step) => `<button class="run-step-btn" data-run-step="${step}" ${isAnyRunning ? "disabled" : ""}>${step === "rescore" ? "Rescore past trends" : `Run ${step}`}</button>`).join("")}
+            </div>
+            <p class="status-label" style="margin-top:18px">Autoresearch pipeline</p>
+            <p class="status-subvalue">No-LLM daily experiments that update ingest, detect, and report policies for future main-pipeline runs.</p>
+            <div class="run-controls">
+              ${autoresearchSteps.map((step) => `<button class="run-step-btn" data-run-step="${step}" ${isAnyRunning ? "disabled" : ""}>${step === "autoresearch_hourly" ? "Run autoresearch" : step === "ingest_policy_optimize" ? "Tune ingest policy" : step === "report_policy_eval" ? "Test report quality" : step === "report_policy_optimize" ? "Tune report policy" : step === "detect_policy_eval" ? "Test detect policy" : step === "detect_policy_optimize" ? "Tune detect policy" : `Run ${step}`}</button>`).join("")}
+            </div>
+            <p class="status-label" style="margin-top:18px">Legacy LLM benchmark</p>
+            <p class="status-subvalue">Manual report-policy regeneration benchmark. This is not part of the hourly no-LLM autoresearch loop.</p>
+            <div class="run-controls">
+              ${legacySteps.map((step) => `<button class="run-step-btn" data-run-step="${step}" ${isAnyRunning ? "disabled" : ""}>Benchmark report policy</button>`).join("")}
             </div>
             ${runEntries.map((entry) => `
               <div class="step-run-block">
                 <p class="status-label" style="margin-bottom:4px;text-transform:capitalize">${escapeHtml(runLabels[entry.name] || entry.name)} ${stepRunBadge(entry.data?.status || "idle")}</p>
                 <p class="status-subvalue">Started: ${safeText(formatIsoTime(entry.data?.started_at), "—")}</p>
                 <p class="status-subvalue">Finished: ${safeText(formatIsoTime(entry.data?.finished_at), "—")}</p>
+                <p class="status-subvalue">Runtime: ${escapeHtml(entry.data?.duration_human || "—")}</p>
                 <p class="status-subvalue">Exit code: ${entry.data?.exit_code == null ? "—" : escapeHtml(String(entry.data.exit_code))}</p>
                 ${entry.data?.log_tail ? `<div class="step-run-log">${escapeHtml(entry.data.log_tail)}</div>` : ""}
               </div>

@@ -3,12 +3,12 @@
   "simple_default_rounds": 2,
   "moderate_default_rounds": 3,
   "complex_default_rounds": 5,
-  "moderate_min_tasks": 3,
-  "complex_min_tasks": 5,
-  "subagent_search_limit": 24,
-  "subagent_max_tokens": 7000,
-  "synthesis_max_tokens": 16000,
-  "revision_max_tokens": 16000,
+  "moderate_min_tasks": 2,
+  "complex_min_tasks": 4,
+  "subagent_search_limit": 16,
+  "subagent_max_tokens": 4500,
+  "synthesis_max_tokens": 10000,
+  "revision_max_tokens": 10000,
   "optimize_topic_limit": 2,
-  "max_report_llm_cost_usd": 1.0
+  "max_report_llm_cost_usd": 0.85
 }
