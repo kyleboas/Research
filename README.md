@@ -16,6 +16,7 @@ The core pipeline lives in `main.py`, with a lightweight dashboard/runner in `se
 - Pulls recent videos from configured YouTube channels via channel RSS feeds.
 - Fetches transcripts from TranscriptAPI for discovered videos.
 - Runs optional full-text extraction for short RSS bodies (`article_extractor.py`).
+- Re-reads a configurable overlap window on incremental runs so late-arriving RSS stories or videos are deduped instead of missed.
 - Chunks content and stores embeddings in Postgres (`source_chunks.embedding`).
 
 ### 2) Detect (`--step detect`)
@@ -41,12 +42,15 @@ The report stage selects top pending candidates that pass quality gates and then
 - synthesis,
 - sufficiency check (+ optional second round),
 - citation verification,
-- final revision.
+- final revision,
+- persistent report artifacts (lead plan, subagent briefs, draft, citation review).
 
 Final reports are saved to:
 
 - Postgres table `reports`, and
 - local `reports/YYYY-MM-DD-<slug>.md`.
+
+Each report run also writes a persistent artifact bundle under `report_runs/<timestamp>-<slug>/` so the lead plan and subagent outputs are stored outside the live prompt chain, following Anthropic's external-memory / artifact pattern.
 
 ## Architecture wireframe
 
@@ -88,10 +92,11 @@ Final reports are saved to:
 │                           Report Generation Layer                           │
 │  main.py::run_report / generate_report                                      │
 │   • quality gate (min score + source diversity)                             │
-│   • planner (LeadResearcher)                                                │
-│   • parallel OODA subagents                                                 │
+│   • planner (LeadResearcher) + persisted lead plan                          │
+│   • parallel OODA subagents + per-agent artifact bundles                    │
 │   • synthesis + sufficiency evaluation                                      │
 │   • citation verification + final revision                                  │
+│   • report_runs/ artifacts for replay/debugging                             │
 └────────────────────────────────┬─────────────────────────────────────────────┘
                                  │
                                  ▼
@@ -135,6 +140,11 @@ Required environment variables (see `env.example`):
 - `TRANSCRIPT_API_KEY`
 - database connection (`DATABASE_URL` or Railway-style `PG*` variables)
 
+Optional ingest safety knobs:
+
+- `RSS_OVERLAP_SECONDS` (default `172800`) adds a 48-hour overlap to incremental RSS fetches.
+- `YOUTUBE_OVERLAP_SECONDS` (default `172800`) adds a 48-hour overlap to per-channel YouTube publication watermarks.
+
 Model selection defaults come from `config.json` and can be overridden via env vars (`MODEL`, `LEAD_MODEL`, `EMBED_MODEL`, etc.). Use exact provider-prefixed model IDs in `config.json` and env vars; the app no longer rewrites alias model names at runtime.
 
 Cloudflare AI Gateway note:
@@ -170,6 +180,7 @@ Channel Name: https://www.youtube.com/channel/UCxxxxxxxxxxxxxxxxxxxxxx
 ```
 
 The ingest step normalizes YouTube sources to canonical `/channel/UC...` URLs.
+It now resolves non-canonical YouTube source URLs at ingest time without rewriting `feeds/youtube.md`.
 
 ## CLI usage
 
