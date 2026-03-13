@@ -63,7 +63,13 @@ The report stage selects top pending candidates that pass quality gates and then
 Final reports are saved to:
 
 - Postgres table `reports`, and
-- local `reports/YYYY-MM-DD-<slug>.md`.
+- local `_posts/YYYY/MM/YYYY-MM-DD-<slug>.md` in Jekyll post format.
+
+When `GITHUB_TOKEN` and `GITHUB_REPO` are configured, the same `_posts/...` file
+is pushed to a dedicated branch, a pull request is opened against
+`GITHUB_BRANCH`, and the stored report metadata includes the resulting PR URL.
+If `DISCORD_WEBHOOK_URL` is configured, the app also posts the new PR link to
+Discord.
 
 Each report run also writes a persistent artifact bundle under `report_runs/<timestamp>-<slug>/` so the lead plan and subagent outputs are stored outside the live prompt chain, following Anthropic's external-memory / artifact pattern.
 
