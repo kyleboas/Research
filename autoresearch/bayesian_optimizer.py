@@ -48,8 +48,10 @@ try:
     from optuna.samplers import CmaEsSampler, TPESampler
 
     OPTUNA_AVAILABLE = True
-except ImportError:
+    OPTUNA_IMPORT_ERROR: ImportError | None = None
+except ImportError as exc:
     OPTUNA_AVAILABLE = False
+    OPTUNA_IMPORT_ERROR = exc
 
 
 @dataclass
@@ -85,7 +87,10 @@ class BayesianOptimizer:
 
     def __init__(self, config: OptimizationConfig | None = None):
         if not OPTUNA_AVAILABLE:
-            raise ImportError("Optuna is required. Install with: pip install optuna")
+            detail = f": {OPTUNA_IMPORT_ERROR}" if OPTUNA_IMPORT_ERROR else ""
+            raise ImportError(
+                "Optuna is unavailable. Install with: pip install optuna" + detail
+            ) from OPTUNA_IMPORT_ERROR
         self.config = config or OptimizationConfig()
         self.study: optuna.Study | None = None
         self._trial_count = 0

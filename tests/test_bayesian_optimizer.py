@@ -4,7 +4,9 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import autoresearch.bayesian_optimizer as bayesian_optimizer
 from autoresearch.bayesian_optimizer import (
     BayesianOptimizer,
     OptimizationConfig,
@@ -96,6 +98,16 @@ class TestBayesianOptimizer(unittest.TestCase):
         except ImportError:
             with self.assertRaises(ImportError):
                 BayesianOptimizer()
+
+    def test_optimizer_surfaces_optuna_import_error_details(self):
+        underlying = ImportError("libstdc++.so.6: cannot open shared object file")
+        with mock.patch.object(bayesian_optimizer, "OPTUNA_AVAILABLE", False), mock.patch.object(
+            bayesian_optimizer, "OPTUNA_IMPORT_ERROR", underlying
+        ):
+            with self.assertRaises(ImportError) as ctx:
+                BayesianOptimizer()
+        self.assertIn("libstdc++.so.6", str(ctx.exception))
+        self.assertIs(ctx.exception.__cause__, underlying)
 
     def test_warm_start_from_results(self):
         try:
