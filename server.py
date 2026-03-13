@@ -10,11 +10,13 @@ from threading import Lock
 from urllib.parse import urlparse
 
 import psycopg
+from dotenv import load_dotenv
 
 from db_conn import resolve_database_conninfo
 
-PORT = int(os.environ.get("PORT", 8080))
 ROOT = Path(__file__).resolve().parent
+load_dotenv(ROOT / ".env")
+PORT = int(os.environ.get("PORT", 8080))
 
 _run_lock = Lock()
 _step_runs = {

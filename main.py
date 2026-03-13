@@ -18,6 +18,7 @@ from urllib.request import Request, urlopen, build_opener, HTTPCookieProcessor
 import xml.etree.ElementTree as ET
 
 import openai, psycopg
+from dotenv import load_dotenv
 from db_conn import resolve_database_conninfo
 from trend_detection import run_bertrend_detection, describe_signals_with_llm
 from article_extractor import extract_article, should_extract
@@ -28,6 +29,7 @@ log = logging.getLogger("research")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
 ROOT = Path(__file__).resolve().parent
+load_dotenv(ROOT / ".env")
 TRANSCRIPT_KEY = os.environ.get("TRANSCRIPT_API_KEY", "")
 NEWSBLUR_USERNAME = os.environ.get("NEWSBLUR_USERNAME", "")
 NEWSBLUR_PASSWORD = os.environ.get("NEWSBLUR_PASSWORD", "")
@@ -1052,6 +1054,17 @@ def chunks_to_context(rows):
 # LLM helpers
 # ══════════════════════════════════════════════
 
+def _coerce_message_content(content):
+    """Normalize SDK response content into the string shape expected by callers."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, (dict, list)):
+        return json.dumps(content, ensure_ascii=False)
+    return str(content)
+
+
 def ask(system, user, model=None, max_tokens=4096):
     """Standard LLM call — system + user → text."""
     resp = _chat_completion_create(
@@ -1062,7 +1075,7 @@ def ask(system, user, model=None, max_tokens=4096):
             {"role": "user",   "content": user},
         ],
     )
-    return resp.choices[0].message.content
+    return _coerce_message_content(resp.choices[0].message.content)
 
 
 def ask_thinking(system, user, budget_tokens=10000, max_tokens=16000):
@@ -1080,7 +1093,7 @@ def ask_thinking(system, user, budget_tokens=10000, max_tokens=16000):
             {"role": "user",   "content": user},
         ],
     )
-    return "", resp.choices[0].message.content
+    return "", _coerce_message_content(resp.choices[0].message.content)
 
 
 def parse_json(text):
@@ -1093,6 +1106,11 @@ def parse_json(text):
 
     Logs the raw payload on failure so the exact bad output is visible.
     """
+    if isinstance(text, (dict, list)):
+        return text
+    if text is None:
+        raise ValueError("No valid JSON found in response: empty response")
+
     stripped = text.strip()
 
     # 1. Direct parse (handles well-formed responses)
