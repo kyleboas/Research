@@ -53,9 +53,17 @@ Or do both in one command:
 - Treat the exported fixture as the frozen input for evaluation
 - Keep scoring interpretable and deterministic
 
-## Next step
+## Live loop
 
-Use the benchmark runner to regenerate a small fixed set of reports under a
-small number of deliberate candidate `report_policy_config.json` settings,
-then compare outcomes with this evaluator. Keep the candidate set small enough
-to be reasonable on Railway.
+The repo now has a basic closed loop for report policy tuning:
+
+1. `benchmark_report.py --refresh-auto --limit 3`
+   regenerates a small fixed set of reports under candidate policies and
+   compares the resulting scores.
+2. `optimize_report_policy.py --refresh-auto --limit 3`
+   runs the same search but applies the best policy back to
+   `report_policy_config.json`.
+3. Railway/dashboard can trigger report policy eval, benchmark, and optimize
+   runs, and Discord receives summaries when those runs finish.
+
+Keep the benchmark topic count small enough to remain reasonable on Railway.

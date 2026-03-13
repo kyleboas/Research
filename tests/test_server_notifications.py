@@ -6,6 +6,7 @@ from server import (
     _format_optimize_notification,
     _format_report_benchmark_notification,
     _format_report_eval_notification,
+    _format_report_optimize_notification,
     _parse_eval_summary,
     _parse_optimize_summary,
     _parse_report_benchmark_summary,
@@ -161,6 +162,17 @@ class ServerNotificationTests(unittest.TestCase):
         )
 
         self.assertIn("Report policy benchmark finished.", message)
+        self.assertIn("Score: 78.25 -> 82.50", message)
+        self.assertIn("Delta: +4.25", message)
+        self.assertIn("Policy changed: yes", message)
+
+    def test_format_report_optimize_notification_reports_policy_change(self):
+        message = _format_report_optimize_notification(
+            {"baseline": 78.25, "best": 82.5, "delta": 4.25},
+            policy_changed=True,
+        )
+
+        self.assertIn("Report policy optimize finished.", message)
         self.assertIn("Score: 78.25 -> 82.50", message)
         self.assertIn("Delta: +4.25", message)
         self.assertIn("Policy changed: yes", message)

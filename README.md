@@ -278,11 +278,13 @@ Harness files:
 - `autoresearch_report/evaluator.py`
 - `autoresearch_report/export_reports_snapshot.py`
 - `autoresearch_report/benchmark_report.py`
+- `autoresearch_report/optimize_report_policy.py`
 
 Run the evaluator on the starter fixture:
 
 ```bash
 .venv/bin/python autoresearch_detect/eval_detect.py
+```
 
 Run the report-quality evaluator against recent reports from Postgres:
 
@@ -296,6 +298,11 @@ policies and compare the generated output scores:
 ```bash
 .venv/bin/python autoresearch_report/benchmark_report.py --refresh-auto --limit 3
 ```
+
+Search for the best report policy on recent topics and apply it to the live pipeline:
+
+```bash
+.venv/bin/python autoresearch_report/optimize_report_policy.py --refresh-auto --limit 3
 ```
 
 Export a real candidate snapshot for manual labeling:
