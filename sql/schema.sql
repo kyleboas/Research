@@ -73,10 +73,45 @@ CREATE TABLE IF NOT EXISTS report_policy_runs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS ingest_policy_runs (
+    id BIGSERIAL PRIMARY KEY,
+    baseline_score DOUBLE PRECISION NOT NULL,
+    best_score DOUBLE PRECISION NOT NULL,
+    delta DOUBLE PRECISION NOT NULL,
+    min_improvement DOUBLE PRECISION NOT NULL DEFAULT 0,
+    applied BOOLEAN NOT NULL DEFAULT FALSE,
+    apply_decision TEXT NOT NULL DEFAULT '',
+    observations JSONB NOT NULL DEFAULT '{}'::jsonb,
+    baseline_policy JSONB NOT NULL DEFAULT '{}'::jsonb,
+    best_policy JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS pipeline_state (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL DEFAULT '',
     updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS pipeline_runs (
+    id BIGSERIAL PRIMARY KEY,
+    step TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'running',
+    trigger_source TEXT NOT NULL DEFAULT 'manual',
+    parent_run_id BIGINT,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    finished_at TIMESTAMPTZ,
+    duration_seconds DOUBLE PRECISION,
+    exit_code INT,
+    llm_calls INT NOT NULL DEFAULT 0,
+    llm_prompt_tokens BIGINT NOT NULL DEFAULT 0,
+    llm_completion_tokens BIGINT NOT NULL DEFAULT 0,
+    llm_cached_prompt_tokens BIGINT NOT NULL DEFAULT 0,
+    llm_reasoning_tokens BIGINT NOT NULL DEFAULT 0,
+    llm_total_tokens BIGINT NOT NULL DEFAULT 0,
+    llm_cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+    summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS trend_candidates (
@@ -163,6 +198,9 @@ CREATE INDEX IF NOT EXISTS idx_trend_candidates_final_score ON trend_candidates 
 CREATE INDEX IF NOT EXISTS idx_trend_candidates_fingerprint ON trend_candidates (trend_fingerprint);
 CREATE INDEX IF NOT EXISTS idx_trend_feedback_created_at ON trend_feedback (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_report_policy_runs_created_at ON report_policy_runs (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ingest_policy_runs_created_at ON ingest_policy_runs (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_pipeline_runs_step_started_at ON pipeline_runs (step, started_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_pipeline_runs_parent_run_id ON pipeline_runs (parent_run_id, started_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
 CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON chunks USING GIN (search_tsv);
 CREATE INDEX IF NOT EXISTS idx_sources_tsv ON sources USING GIN (search_tsv);

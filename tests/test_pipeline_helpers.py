@@ -32,6 +32,7 @@ from main import (
     normalize_text_for_hash,
     normalize_trend_text,
     parse_youtube,
+    _extract_youtube_transcript_from_markdown,
     trend_fingerprint,
     upsert_trend_candidate,
 )
@@ -277,7 +278,7 @@ class PipelineHelperTests(unittest.TestCase):
         )
 
         self.assertEqual(source_diversity, 3)
-        self.assertEqual(final_score, 75)
+        self.assertEqual(final_score, 72)
 
     def test_parse_rescore_statuses_handles_empty_and_csv_values(self):
         self.assertIsNone(_parse_rescore_statuses(""))

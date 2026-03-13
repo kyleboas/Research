@@ -6,7 +6,7 @@ Architecture mirrors Anthropic's production research system:
   → Synthesis → Sufficiency evaluation → optional re-plan → CitationAgent → Revision
 """
 
-import argparse, base64, hashlib, json, logging, math, os, platform, random, re, socket, time
+import argparse, base64, hashlib, json, logging, math, os, random, re, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 from http.cookiejar import CookieJar
@@ -45,7 +45,9 @@ from trend_detection import run_bertrend_detection, describe_signals_with_llm
 from article_extractor import extract_article, should_extract
 from tactical_extraction import chunk_with_context, extract_tactical_patterns, extract_tactical_context
 from novelty_scoring import update_baseline
+from ingest_policy import load_policy as load_ingest_policy
 from report_policy import load_policy as load_report_policy
+from runtime_logging import finish_run, llm_usage_tracking, record_llm_usage, start_run, utc_now
 
 log = logging.getLogger("research")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -54,8 +56,6 @@ ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
 NEWSBLUR_USERNAME = os.environ.get("NEWSBLUR_USERNAME", "")
 NEWSBLUR_PASSWORD = os.environ.get("NEWSBLUR_PASSWORD", "")
-RSS_OVERLAP_SECONDS = max(0, int(os.environ.get("RSS_OVERLAP_SECONDS", str(48 * 60 * 60))))
-YOUTUBE_OVERLAP_SECONDS = max(0, int(os.environ.get("YOUTUBE_OVERLAP_SECONDS", str(48 * 60 * 60))))
 
 # ── Cloudflare AI Gateway ──────────────────────────────────────────────────────
 CLOUDFLARE_GATEWAY_URL = os.environ.get("CLOUDFLARE_GATEWAY_URL", "")
@@ -71,6 +71,15 @@ DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
 # ── Config file (config.json) overrides env-var model defaults ────────────────
 _cfg_path = ROOT / "config.json"
 _CFG: dict = json.loads(_cfg_path.read_text()) if _cfg_path.exists() else {}
+INGEST_POLICY = load_ingest_policy()
+RSS_OVERLAP_SECONDS = max(
+    0,
+    int(os.environ.get("RSS_OVERLAP_SECONDS", str(int(INGEST_POLICY["rss_overlap_seconds"])))),
+)
+YOUTUBE_OVERLAP_SECONDS = max(
+    0,
+    int(os.environ.get("YOUTUBE_OVERLAP_SECONDS", str(int(INGEST_POLICY["youtube_overlap_seconds"])))),
+)
 REPORT_POLICY = load_report_policy()
 MAX_RESEARCH_ROUNDS = int(REPORT_POLICY["max_research_rounds"])
 
@@ -260,7 +269,9 @@ def _chat_completion_create(*, model: str, max_tokens: int, messages: list[dict]
         return client.chat.completions.create(**minimal)
 
     try:
-        return _call_with_bad_format_retries(kwargs)
+        response = _call_with_bad_format_retries(kwargs)
+        record_llm_usage(response, model_name=model_name, operation="chat")
+        return response
     except openai.AuthenticationError:
         _log_auth_hint_for_model(model_name)
         raise
@@ -1085,6 +1096,7 @@ def embed(texts):
     for attempt in range(1, max_attempts + 1):
         try:
             resp = client.embeddings.create(model=_resolved_embed_model, input=cleaned_inputs)
+            record_llm_usage(resp, model_name=_resolved_embed_model, operation="embedding")
             dense = [None] * total_inputs
             for source_idx, embedding_obj in zip(index_map, resp.data):
                 dense[source_idx] = embedding_obj.embedding
@@ -2908,6 +2920,29 @@ def run_rescore(conn, *, limit: int = 0, batch_size: int = 100, statuses: list[s
     )
 
 
+def _runtime_summary_payload(*, llm_usage: dict) -> dict:
+    return {
+        "llm_usage": llm_usage,
+    }
+
+
+def _emit_runtime_summary(step: str, summary: dict | None) -> None:
+    llm_usage = ((summary or {}).get("llm_usage") or {}) if isinstance(summary, dict) else {}
+    print(f"RUN_STEP={step}")
+    print(f"RUN_LLM_CALLS={int(llm_usage.get('llm_calls', 0) or 0)}")
+    print(f"RUN_PROMPT_TOKENS={int(llm_usage.get('prompt_tokens', 0) or 0)}")
+    print(f"RUN_COMPLETION_TOKENS={int(llm_usage.get('completion_tokens', 0) or 0)}")
+    print(f"RUN_CACHED_PROMPT_TOKENS={int(llm_usage.get('cached_prompt_tokens', 0) or 0)}")
+    print(f"RUN_REASONING_TOKENS={int(llm_usage.get('reasoning_tokens', 0) or 0)}")
+    print(f"RUN_TOTAL_TOKENS={int(llm_usage.get('total_tokens', 0) or 0)}")
+    print(f"RUN_LLM_COST_USD={float(llm_usage.get('llm_cost_usd', 0.0) or 0.0):.6f}")
+    print(f"RUN_UNPRICED_CALLS={int(llm_usage.get('unpriced_calls', 0) or 0)}")
+    print(
+        "RUN_UNPRICED_MODELS="
+        + json.dumps(sorted(llm_usage.get("unpriced_models") or []), ensure_ascii=False)
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Football research pipeline")
     parser.add_argument(
@@ -2931,8 +2966,8 @@ def main():
     parser.add_argument(
         "--min-new-sources-for-detect",
         type=int,
-        default=0,
-        help="Skip detect when latest ingest inserted fewer than this many new sources (default: 0)",
+        default=int(INGEST_POLICY.get("detect_min_new_sources", 0)),
+        help="Skip detect when latest ingest inserted fewer than this many new sources (default: ingest_policy_config.json value)",
     )
     parser.add_argument(
         "--rescore-limit",
@@ -2961,43 +2996,92 @@ def main():
     _validate_required_env(args.step)
 
     conn = _connect_db()
+    started_at = utc_now()
+    db_run = None
+    self_logging_enabled = (os.environ.get("PIPELINE_DISABLE_SELF_LOGGING", "").strip().lower() not in {"1", "true", "yes"})
+    parent_run_id_raw = (os.environ.get("PIPELINE_PARENT_RUN_ID") or "").strip()
+    parent_run_id = int(parent_run_id_raw) if parent_run_id_raw.isdigit() else None
+    trigger_source = (os.environ.get("PIPELINE_TRIGGER_SOURCE") or "cli").strip() or "cli"
+    llm_usage = {}
+    usage_tracker = None
     try:
         _ensure_schema(conn)
-        if args.step == "ingest":
-            run_ingest(conn)
-        elif args.step == "backfill":
-            run_backfill(conn, lookback_days=args.backfill_days, limit=args.backfill_limit)
-        elif args.step == "detect":
-            run_detect(
+        if self_logging_enabled:
+            db_run = start_run(
                 conn,
-                min_new_sources=args.min_new_sources_for_detect,
-                backfill_days=args.backfill_days,
-                backfill_limit=args.backfill_limit,
+                step=args.step,
+                trigger_source=trigger_source,
+                parent_run_id=parent_run_id,
+                started_at=started_at,
             )
-        elif args.step == "rescore":
-            run_rescore(
-                conn,
-                limit=args.rescore_limit,
-                batch_size=args.rescore_batch_size,
-                statuses=_parse_rescore_statuses(args.rescore_statuses),
-            )
-        elif args.step == "report":
-            run_report(conn)
-        else:
-            run_ingest(conn)
-            run_detect(
-                conn,
-                min_new_sources=args.min_new_sources_for_detect,
-                backfill_days=args.backfill_days,
-                backfill_limit=args.backfill_limit,
-            )
-            if args.allow_report_after_detect:
+            conn.commit()
+
+        with llm_usage_tracking() as usage_tracker:
+            if args.step == "ingest":
+                run_ingest(conn)
+            elif args.step == "backfill":
+                run_backfill(conn, lookback_days=args.backfill_days, limit=args.backfill_limit)
+            elif args.step == "detect":
+                run_detect(
+                    conn,
+                    min_new_sources=args.min_new_sources_for_detect,
+                    backfill_days=args.backfill_days,
+                    backfill_limit=args.backfill_limit,
+                )
+            elif args.step == "rescore":
+                run_rescore(
+                    conn,
+                    limit=args.rescore_limit,
+                    batch_size=args.rescore_batch_size,
+                    statuses=_parse_rescore_statuses(args.rescore_statuses),
+                )
+            elif args.step == "report":
                 run_report(conn)
             else:
-                log.info(
-                    "Step 'all' now runs ingest+detect only. "
-                    "Use --allow-report-after-detect to run report in the same process."
+                run_ingest(conn)
+                run_detect(
+                    conn,
+                    min_new_sources=args.min_new_sources_for_detect,
+                    backfill_days=args.backfill_days,
+                    backfill_limit=args.backfill_limit,
                 )
+                if args.allow_report_after_detect:
+                    run_report(conn)
+                else:
+                    log.info(
+                        "Step 'all' now runs ingest+detect only. "
+                        "Use --allow-report-after-detect to run report in the same process."
+                    )
+            llm_usage = usage_tracker.summary()
+            summary = _runtime_summary_payload(llm_usage=llm_usage)
+            _emit_runtime_summary(args.step, summary)
+            if db_run is not None:
+                finish_run(
+                    conn,
+                    run=db_run,
+                    status="success",
+                    finished_at=utc_now(),
+                    exit_code=0,
+                    summary=summary,
+                )
+                conn.commit()
+    except BaseException as exc:
+        if usage_tracker is not None:
+            llm_usage = usage_tracker.summary()
+        summary = _runtime_summary_payload(llm_usage=llm_usage)
+        _emit_runtime_summary(args.step, summary)
+        if db_run is not None:
+            exit_code = exc.code if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
+            finish_run(
+                conn,
+                run=db_run,
+                status="failed",
+                finished_at=utc_now(),
+                exit_code=exit_code,
+                summary=summary,
+            )
+            conn.commit()
+        raise
     finally:
         conn.close()
 

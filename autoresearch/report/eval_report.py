@@ -6,12 +6,12 @@ import json
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from autoresearch_report.evaluator import evaluate_items, load_fixture
-from autoresearch_report.export_reports_snapshot import export_snapshot
+from autoresearch.report.evaluator import evaluate_items, load_fixture
+from autoresearch.report.export_reports_snapshot import export_snapshot
 from report_policy import get_policy_path
 
 DEFAULT_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "recent_reports.json"

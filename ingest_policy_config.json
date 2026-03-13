@@ -1,0 +1,5 @@
+{
+  "rss_overlap_seconds": 172800,
+  "youtube_overlap_seconds": 172800,
+  "detect_min_new_sources": 0
+}

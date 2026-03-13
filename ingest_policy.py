@@ -5,22 +5,13 @@ import os
 from pathlib import Path
 
 DEFAULT_POLICY = {
-    "max_research_rounds": 2,
-    "simple_default_rounds": 2,
-    "moderate_default_rounds": 3,
-    "complex_default_rounds": 5,
-    "moderate_min_tasks": 2,
-    "complex_min_tasks": 4,
-    "subagent_search_limit": 16,
-    "subagent_max_tokens": 4500,
-    "synthesis_max_tokens": 10000,
-    "revision_max_tokens": 10000,
-    "optimize_topic_limit": 2,
-    "max_report_llm_cost_usd": 0.85,
+    "rss_overlap_seconds": 48 * 60 * 60,
+    "youtube_overlap_seconds": 48 * 60 * 60,
+    "detect_min_new_sources": 0,
 }
 
-_POLICY_ENV_VAR = "REPORT_POLICY_PATH"
-_DEFAULT_POLICY_PATH = Path(__file__).with_name("report_policy_config.json")
+_POLICY_ENV_VAR = "INGEST_POLICY_PATH"
+_DEFAULT_POLICY_PATH = Path(__file__).with_name("ingest_policy_config.json")
 
 
 def get_policy_path() -> Path:

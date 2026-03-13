@@ -8,12 +8,12 @@ import sys
 from datetime import datetime, UTC
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from autoresearch_detect.evaluator import evaluate_items, load_fixture
-from autoresearch_detect.export_candidates_snapshot import export_snapshot
+from autoresearch.detect.evaluator import evaluate_items, load_fixture
+from autoresearch.detect.export_candidates_snapshot import export_snapshot
 from detect_policy import DEFAULT_POLICY, get_policy_path, load_policy, save_policy
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"

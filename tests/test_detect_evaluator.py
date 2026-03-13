@@ -1,6 +1,6 @@
 import unittest
 
-from autoresearch_detect.evaluator import evaluate_items
+from autoresearch.detect.evaluator import evaluate_items
 
 
 class DetectEvaluatorTests(unittest.TestCase):

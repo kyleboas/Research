@@ -9,13 +9,13 @@ from pathlib import Path
 
 import psycopg
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from autoresearch_report.evaluator import score_report
-from autoresearch_report.eval_report import DEFAULT_FIXTURE
-from autoresearch_report.export_reports_snapshot import export_snapshot
+from autoresearch.report.evaluator import score_report
+from autoresearch.report.eval_report import DEFAULT_FIXTURE
+from autoresearch.report.export_reports_snapshot import export_snapshot
 from db_conn import resolve_database_conninfo
 from main import generate_report, set_report_policy
 from report_policy import get_policy_path, load_policy, save_policy
@@ -44,13 +44,13 @@ def candidate_policies(base_policy: dict):
         {
             **base_policy,
             "optimize_topic_limit": min(int(base_policy.get("optimize_topic_limit", 2) or 2), 1),
-            "moderate_min_tasks": max(2, int(base_policy["moderate_min_tasks"]) - 1),
+            "moderate_min_tasks": max(2, int(base_policy["moderate_min_tasks"])),
             "complex_min_tasks": max(3, int(base_policy["complex_min_tasks"]) - 1),
-            "subagent_search_limit": max(12, int(base_policy["subagent_search_limit"]) - 8),
-            "subagent_max_tokens": max(4000, int(base_policy["subagent_max_tokens"]) - 2000),
-            "synthesis_max_tokens": max(10000, int(base_policy["synthesis_max_tokens"]) - 4000),
-            "revision_max_tokens": max(10000, int(base_policy["revision_max_tokens"]) - 4000),
-            "max_report_llm_cost_usd": min(float(base_policy.get("max_report_llm_cost_usd", 1.0) or 1.0), 0.75),
+            "subagent_search_limit": max(12, int(base_policy["subagent_search_limit"]) - 4),
+            "subagent_max_tokens": max(4000, int(base_policy["subagent_max_tokens"]) - 500),
+            "synthesis_max_tokens": max(9000, int(base_policy["synthesis_max_tokens"]) - 1000),
+            "revision_max_tokens": max(9000, int(base_policy["revision_max_tokens"]) - 1000),
+            "max_report_llm_cost_usd": min(float(base_policy.get("max_report_llm_cost_usd", 0.85) or 0.85), 0.75),
         },
         {
             **base_policy,
@@ -60,8 +60,8 @@ def candidate_policies(base_policy: dict):
         },
         {
             **base_policy,
-            "synthesis_max_tokens": max(int(base_policy["synthesis_max_tokens"]), 20000),
-            "revision_max_tokens": max(int(base_policy["revision_max_tokens"]), 20000),
+            "synthesis_max_tokens": max(int(base_policy["synthesis_max_tokens"]), 14000),
+            "revision_max_tokens": max(int(base_policy["revision_max_tokens"]), 14000),
         },
         {
             **base_policy,
@@ -73,8 +73,8 @@ def candidate_policies(base_policy: dict):
             "moderate_min_tasks": max(int(base_policy["moderate_min_tasks"]), 4),
             "complex_min_tasks": max(int(base_policy["complex_min_tasks"]), 6),
             "subagent_search_limit": max(int(base_policy["subagent_search_limit"]), 30),
-            "synthesis_max_tokens": max(int(base_policy["synthesis_max_tokens"]), 20000),
-            "revision_max_tokens": max(int(base_policy["revision_max_tokens"]), 20000),
+            "synthesis_max_tokens": max(int(base_policy["synthesis_max_tokens"]), 16000),
+            "revision_max_tokens": max(int(base_policy["revision_max_tokens"]), 16000),
         },
     ]
     seen = {json.dumps(base_policy, sort_keys=True)}

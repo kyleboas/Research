@@ -25,8 +25,8 @@ If `.venv/bin/python` exists, the Makefile uses it automatically.
 
 - CLI: `python main.py --step <ingest|backfill|detect|rescore|report|all>`
 - Dashboard: `python server.py`
-- Detect eval: `python autoresearch_detect/eval_detect.py`
-- Detect optimizer: `python autoresearch_detect/optimize_detect_policy.py`
+- Detect eval: `python autoresearch/detect/eval_detect.py`
+- Detect optimizer: `python autoresearch/detect/optimize_detect_policy.py`
 
 ## Where To Edit
 
