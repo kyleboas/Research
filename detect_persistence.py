@@ -2,7 +2,7 @@ import hashlib
 import logging
 import re
 
-from detect_policy import compute_final_score
+from detect_policy import compute_final_score, score_breakdown
 
 log = logging.getLogger("research")
 
@@ -21,6 +21,19 @@ def upsert_trend_candidate(conn, candidate: dict, feedback_adjustment: int):
     base_score = int(candidate["score"])
     novelty = candidate.get("novelty_score")
     source_diversity = candidate.get("source_diversity", len(candidate.get("sources") or []))
+    sources = candidate.get("sources")
+    
+    # Compute score breakdown with source qualification
+    breakdown = score_breakdown(
+        base_score=base_score,
+        novelty_score=novelty,
+        feedback_adjustment=feedback_adjustment,
+        source_diversity=source_diversity,
+        sources=sources,
+    )
+    final_score = breakdown["final_score"]
+    weak_signal = breakdown["weak_signal"]
+    authority_classification = breakdown["authority_classification"]
     
     # Trajectory fields
     velocity = candidate.get("velocity_score")
@@ -40,12 +53,19 @@ def upsert_trend_candidate(conn, candidate: dict, feedback_adjustment: int):
             stored_score = max(existing_score or 0, base_score)
             stored_diversity = max(existing_source_diversity or 0, source_diversity)
             stored_feedback = existing_feedback if existing_feedback not in (None, 0) else feedback_adjustment
-            final_score = compute_final_score(
+            
+            # Recompute with stored values
+            breakdown = score_breakdown(
                 base_score=stored_score,
                 novelty_score=novelty,
                 feedback_adjustment=stored_feedback,
                 source_diversity=stored_diversity,
+                sources=sources,
             )
+            final_score = breakdown["final_score"]
+            weak_signal = breakdown["weak_signal"]
+            authority_classification = breakdown["authority_classification"]
+            
             next_status = "reported" if existing_status == "reported" else "pending"
             cur.execute(
                 """
@@ -63,7 +83,9 @@ def upsert_trend_candidate(conn, candidate: dict, feedback_adjustment: int):
                     acceleration_score = %s,
                     trajectory_direction = %s,
                     early_trend_score = %s,
-                    trajectory_reasoning = %s
+                    trajectory_reasoning = %s,
+                    weak_signal = %s,
+                    authority_classification = %s
                 WHERE id = %s
                 RETURNING id, final_score
                 """,
@@ -81,25 +103,22 @@ def upsert_trend_candidate(conn, candidate: dict, feedback_adjustment: int):
                     direction,
                     early_trend,
                     trajectory_reasoning,
+                    weak_signal,
+                    authority_classification,
                     candidate_id,
                 ),
             )
             row = cur.fetchone()
-            return row[0], int(row[1] or final_score), stored_diversity
+            return row[0], int(row[1] or final_score), stored_diversity, weak_signal, authority_classification
 
-        final_score = compute_final_score(
-            base_score=base_score,
-            novelty_score=novelty,
-            feedback_adjustment=feedback_adjustment,
-            source_diversity=source_diversity,
-        )
+        # Insert new candidate
         cur.execute(
             """
             INSERT INTO trend_candidates
             (trend_fingerprint, trend, reasoning, score, feedback_adjustment, final_score, 
              novelty_score, source_diversity, velocity_score, acceleration_score, 
-             trajectory_direction, early_trend_score, trajectory_reasoning)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             trajectory_direction, early_trend_score, trajectory_reasoning, weak_signal, authority_classification)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id, final_score
             """,
             (
@@ -116,10 +135,12 @@ def upsert_trend_candidate(conn, candidate: dict, feedback_adjustment: int):
                 direction,
                 early_trend,
                 trajectory_reasoning,
+                weak_signal,
+                authority_classification,
             ),
         )
         row = cur.fetchone()
-        return row[0], int(row[1] or final_score), source_diversity
+        return row[0], int(row[1] or final_score), source_diversity, weak_signal, authority_classification
 
 
 def effective_source_diversity(stored_source_diversity: int | None, linked_source_count: int | None) -> int:
@@ -133,15 +154,17 @@ def rescored_trend_candidate_values(
     stored_source_diversity: int | None,
     linked_source_count: int | None,
     novelty_score: float | None,
-) -> tuple[int, int]:
+    sources: list[dict] | None = None,
+) -> tuple[int, int, bool, str | None]:
     source_diversity = effective_source_diversity(stored_source_diversity, linked_source_count)
-    final_score = compute_final_score(
+    breakdown = score_breakdown(
         base_score=int(base_score),
         novelty_score=novelty_score,
         feedback_adjustment=int(feedback_adjustment or 0),
         source_diversity=source_diversity,
+        sources=sources,
     )
-    return source_diversity, final_score
+    return source_diversity, breakdown["final_score"], breakdown["weak_signal"], breakdown["authority_classification"]
 
 
 def parse_rescore_statuses(raw: str | None) -> list[str] | None:
@@ -149,22 +172,33 @@ def parse_rescore_statuses(raw: str | None) -> list[str] | None:
     return statuses or None
 
 
-def persist_detect_candidates(conn, candidates: list[dict]) -> list[int]:
-    stored_scores: list[int] = []
+def persist_detect_candidates(conn, candidates: list[dict]) -> list[dict]:
+    """Persist detected candidates and return list of result dicts with scores and weak_signal flags."""
+    results: list[dict] = []
     with conn.cursor() as cur:
         for candidate in candidates:
-            trend_candidate_id, final_score, _ = upsert_trend_candidate(
+            trend_candidate_id, final_score, source_diversity, weak_signal, authority_classification = upsert_trend_candidate(
                 conn,
                 candidate,
                 int(candidate.get("feedback_adjustment", 0)),
             )
+            # Store weak_signal info back on candidate for API response
+            candidate["weak_signal"] = weak_signal
+            candidate["authority_classification"] = authority_classification
+            
             for source in candidate.get("sources") or []:
                 cur.execute(
                     "INSERT INTO trend_candidate_sources (trend_candidate_id, source_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                     (trend_candidate_id, source["source_id"]),
                 )
-            stored_scores.append(final_score)
-    return stored_scores
+            results.append({
+                "id": trend_candidate_id,
+                "final_score": final_score,
+                "source_diversity": source_diversity,
+                "weak_signal": weak_signal,
+                "authority_classification": authority_classification,
+            })
+    return results
 
 
 def load_rescore_candidates(conn, *, limit: int = 0, statuses: list[str] | None = None):
@@ -178,9 +212,21 @@ def load_rescore_candidates(conn, *, limit: int = 0, statuses: list[str] | None 
             COUNT(tcs.source_id) AS linked_source_count,
             tc.novelty_score,
             COALESCE(tc.final_score, tc.score) AS existing_final_score,
-            tc.status
+            tc.status,
+            tc.weak_signal,
+            tc.authority_classification,
+            COALESCE(
+                jsonb_agg(
+                    jsonb_build_object(
+                        'source_id', s.id,
+                        'title', s.title
+                    ) ORDER BY s.id
+                ) FILTER (WHERE s.id IS NOT NULL),
+                '[]'::jsonb
+            ) AS sources
         FROM trend_candidates tc
         LEFT JOIN trend_candidate_sources tcs ON tcs.trend_candidate_id = tc.id
+        LEFT JOIN sources s ON s.id = tcs.source_id
     """
     params = []
     if statuses:
@@ -212,16 +258,20 @@ def update_rescored_candidates(conn, updates: list[tuple]) -> int:
             existing_final_score,
             stored_source_diversity,
             status,
+            weak_signal,
+            authority_classification,
         ) in updates:
             cur.execute(
                 """
                 UPDATE trend_candidates
                 SET novelty_score = %s,
                     final_score = %s,
-                    source_diversity = %s
+                    source_diversity = %s,
+                    weak_signal = %s,
+                    authority_classification = %s
                 WHERE id = %s
                 """,
-                (novelty_score, final_score, source_diversity, candidate_id),
+                (novelty_score, final_score, source_diversity, weak_signal, authority_classification, candidate_id),
             )
             if (
                 existing_novelty is None
@@ -231,11 +281,12 @@ def update_rescored_candidates(conn, updates: list[tuple]) -> int:
             ):
                 changed += 1
             log.debug(
-                "Rescored trend_candidate id=%s status=%s final_score=%s novelty=%.4f source_diversity=%s",
+                "Rescored trend_candidate id=%s status=%s final_score=%s novelty=%.4f source_diversity=%s weak_signal=%s",
                 candidate_id,
                 status,
                 final_score,
                 novelty_score,
                 source_diversity,
+                weak_signal,
             )
     return changed

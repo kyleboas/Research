@@ -1252,13 +1252,15 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     """
                     SELECT column_name FROM information_schema.columns
                     WHERE table_name = 'trend_candidates'
-                    AND column_name IN ('novelty_score', 'source_diversity', 'velocity_score', 'acceleration_score', 'trajectory_direction', 'early_trend_score', 'trajectory_reasoning')
+                    AND column_name IN ('novelty_score', 'source_diversity', 'velocity_score', 'acceleration_score', 'trajectory_direction', 'early_trend_score', 'trajectory_reasoning', 'weak_signal', 'authority_classification')
                     """
                 )
                 available_cols = {row[0] for row in cur.fetchall()}
                 has_novelty = "novelty_score" in available_cols
                 has_diversity = "source_diversity" in available_cols
                 has_trajectory = "velocity_score" in available_cols
+                has_weak_signal = "weak_signal" in available_cols
+                has_authority = "authority_classification" in available_cols
 
                 novelty_select = "tc.novelty_score" if has_novelty else "NULL AS novelty_score"
                 diversity_select = "tc.source_diversity" if has_diversity else "0 AS source_diversity"
@@ -1267,6 +1269,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 direction_select = "tc.trajectory_direction" if has_trajectory else "NULL AS trajectory_direction"
                 early_trend_select = "tc.early_trend_score" if has_trajectory else "NULL AS early_trend_score"
                 trajectory_reasoning_select = "tc.trajectory_reasoning" if has_trajectory else "NULL AS trajectory_reasoning"
+                weak_signal_select = "tc.weak_signal" if has_weak_signal else "NULL AS weak_signal"
+                authority_select = "tc.authority_classification" if has_authority else "NULL AS authority_classification"
 
                 detect_query = """
                     SELECT
@@ -1295,7 +1299,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                         {acceleration},
                         {direction},
                         {early_trend},
-                        {trajectory_reasoning}
+                        {trajectory_reasoning},
+                        {weak_signal},
+                        {authority}
                     FROM trend_candidates tc
                     {source_join}
                     GROUP BY tc.id
@@ -1309,6 +1315,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     direction=direction_select,
                     early_trend=early_trend_select,
                     trajectory_reasoning=trajectory_reasoning_select,
+                    weak_signal=weak_signal_select,
+                    authority=authority_select,
                     source_join=(
                         """
                         LEFT JOIN trend_candidate_sources tcs ON tcs.trend_candidate_id = tc.id
@@ -1337,6 +1345,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                         "trajectory_direction": row[13] or "flat",
                         "early_trend_score": round(float(row[14]), 4) if row[14] is not None else None,
                         "trajectory_reasoning": row[15] or "",
+                        "weak_signal": row[16] if row[16] is not None else False,
+                        "authority_classification": row[17] if row[17] is not None else None,
                     }
                     for row in cur.fetchall()
                 ]
@@ -1659,7 +1669,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 try:
                     report_id = int(parts[2])
                 except ValueError:
-                    self._send_json({"ok": False, "error": "invalid_report_id"}, status=400)
+                    self._send_html("<html><body><h1>Invalid report id</h1></body></html>", status=400)
                     return
                 try:
                     record = self._fetch_report_by_id(report_id)

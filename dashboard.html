@@ -310,6 +310,8 @@
       .badge-step-running { background: #dbeafe; color: #1d4ed8; }
       .badge-step-success { background: #d1fae5; color: #065f46; }
       .badge-step-failed { background: #fee2e2; color: #991b1b; }
+      .badge-weak-signal { background: #fee2e2; color: #991b1b; }
+      .badge-authority { background: #d1fae5; color: #065f46; }
 
       /* ── Pattern card ── */
       .pattern-card {
@@ -554,15 +556,26 @@
         return '<span style="color:#9ca3af;font-weight:700">→</span>';
       };
 
+      // Weak signal / authority badge for source qualification policy
+      const weakSignalBadge = (item) => {
+        if (item.weak_signal === true) {
+          return '<span class="badge badge-weak-signal">⚠️ Weak Signal</span>';
+        }
+        if (item.authority_classification === "high_authority") {
+          return '<span class="badge badge-authority">✓ Authority Source</span>';
+        }
+        return '';
+      };
+
       const renderDetect = (items) => {
         detectEl.innerHTML = "";
         if (!items.length) {
-          renderEmpty(detectEl, "No detected trends yet", "Run detect to populate this tab.");
+          renderEmpty(detectEl, "No trends detected", "Run detect to populate this tab.");
           return;
         }
 
-        // Simplified header
-        detectEl.insertAdjacentHTML("beforeend",
+        detectEl.insertAdjacentHTML(
+          "beforeend",
           `<p style="color:var(--subtext);margin:8px 0 16px;font-size:0.9rem">` +
           `${items.length} trends detected. Rising trajectories (↑) indicate early-stage trends worth watching.</p>`
         );
@@ -590,6 +603,7 @@
             `<div style="margin:8px 0;display:flex;gap:8px;flex-wrap:wrap;align-items:center">` +
             `${arrow} <span style="font-size:0.85rem;color:var(--subtext);text-transform:capitalize">${direction}</span>` +
             noveltyBadge(item.novelty_score) +
+            weakSignalBadge(item) +
             (item.source_diversity ? `<span class="badge badge-rss">${item.source_diversity} sources</span>` : '') +
             (item.early_trend_score != null ? `<span style="font-size:0.8rem;color:var(--subtext)">Early-trend: ${Math.round(item.early_trend_score * 100)}%</span>` : '') +
             `</div>` +

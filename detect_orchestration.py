@@ -152,31 +152,45 @@ def run_rescore(conn, *, limit: int = 0, batch_size: int = 100, statuses: list[s
                 existing_novelty,
                 existing_final_score,
                 status,
+                weak_signal,
+                authority_classification,
+                sources,
             ) = row
             if not vec:
                 skipped += 1
                 log.warning("Trend rescore skipped candidate_id=%s because embedding was unavailable", candidate_id)
                 continue
 
-            source_diversity = effective_source_diversity(stored_source_diversity, linked_source_count)
-            novelty_score = compute_novelty_score(conn, trend, vec, source_count=source_diversity)
-            source_diversity, final_score = rescored_trend_candidate_values(
+            # Parse sources from JSONB if needed
+            if isinstance(sources, str):
+                try:
+                    import json
+                    sources = json.loads(sources)
+                except Exception:
+                    sources = []
+            if not isinstance(sources, list):
+                sources = []
+
+            source_diversity, final_score, new_weak_signal, new_authority = rescored_trend_candidate_values(
                 base_score=base_score,
                 feedback_adjustment=feedback_adjustment,
                 stored_source_diversity=stored_source_diversity,
                 linked_source_count=linked_source_count,
-                novelty_score=novelty_score,
+                novelty_score=compute_novelty_score(conn, trend, vec, source_count=max(int(stored_source_diversity or 0), int(linked_source_count or 0))),
+                sources=sources,
             )
             updates.append(
                 (
                     candidate_id,
-                    novelty_score,
+                    compute_novelty_score(conn, trend, vec, source_count=source_diversity),
                     final_score,
                     source_diversity,
                     existing_novelty,
                     int(existing_final_score or base_score),
                     int(stored_source_diversity or 0),
                     status,
+                    new_weak_signal,
+                    new_authority,
                 )
             )
 
