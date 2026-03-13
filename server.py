@@ -39,6 +39,13 @@ RUN_COMMANDS = {
         "--limit",
         "3",
     ],
+    "report_policy_optimize": [
+        sys.executable,
+        str(ROOT / "autoresearch_report" / "optimize_report_policy.py"),
+        "--refresh-auto",
+        "--limit",
+        "3",
+    ],
     "detect_policy_eval": [sys.executable, str(ROOT / "autoresearch_detect" / "eval_detect.py")],
     "detect_policy_optimize": [
         sys.executable,
@@ -55,6 +62,7 @@ _step_runs = {
     "report": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
     "report_policy_eval": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
     "report_policy_benchmark": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
+    "report_policy_optimize": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
     "detect_policy_eval": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
     "detect_policy_optimize": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
 }
@@ -237,6 +245,18 @@ def _format_report_benchmark_notification(summary, *, policy_changed: bool):
     return "\n".join(lines)
 
 
+def _format_report_optimize_notification(summary, *, policy_changed: bool):
+    if not summary:
+        return f"Report policy optimize finished.\n• Policy changed: {'yes' if policy_changed else 'no'}"
+    lines = ["Report policy optimize finished."]
+    if summary.get("baseline") is not None and summary.get("best") is not None:
+        lines.append(f"• Score: {summary['baseline']:.2f} -> {summary['best']:.2f}")
+    if summary.get("delta") is not None:
+        lines.append(f"• Delta: {summary['delta']:+.2f}")
+    lines.append(f"• Policy changed: {'yes' if policy_changed else 'no'}")
+    return "\n".join(lines)
+
+
 def _parse_optimize_summary(log_text):
     text = str(log_text or "")
     result = {}
@@ -356,6 +376,13 @@ def _notify_step_completion(step, run_meta, state):
             _parse_report_benchmark_summary(_read_log_text(run_meta.get("log_path"))),
             policy_changed=before_policy != after_policy,
         )
+    elif step == "report_policy_optimize":
+        before_policy = run_meta.get("report_policy_before", "")
+        after_policy = _load_report_policy_text()
+        message = _format_report_optimize_notification(
+            _parse_report_benchmark_summary(_read_log_text(run_meta.get("log_path"))),
+            policy_changed=before_policy != after_policy,
+        )
     elif step == "detect_policy_eval":
         message = _format_eval_notification(_parse_eval_summary(_read_log_text(run_meta.get("log_path"))))
     elif step == "detect_policy_optimize":
@@ -443,7 +470,7 @@ def _start_step_run(step):
         run_meta = {"log_file": log_file, "log_path": log_file.name}
         if step == "detect":
             run_meta["baseline"] = _load_detect_baseline()
-        elif step == "report_policy_benchmark":
+        elif step in {"report_policy_benchmark", "report_policy_optimize"}:
             run_meta["report_policy_before"] = _load_report_policy_text()
         elif step == "detect_policy_optimize":
             run_meta["policy_before"] = _load_policy_text()
