@@ -8,7 +8,17 @@ from __future__ import annotations
 
 import os
 import re
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - dependency is expected in normal runs
+    load_dotenv = None
+
+
+if load_dotenv is not None:
+    load_dotenv(Path(__file__).resolve().with_name(".env"))
 
 
 _URL_ENV_KEYS = (

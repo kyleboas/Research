@@ -6,7 +6,7 @@ Architecture mirrors Anthropic's production research system:
   → Synthesis → Sufficiency evaluation → optional re-plan → CitationAgent → Revision
 """
 
-import argparse, json, logging, math, os, platform, random, re, socket, time
+import argparse, hashlib, json, logging, math, os, platform, random, re, socket, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from http.cookiejar import CookieJar
@@ -20,6 +20,7 @@ import xml.etree.ElementTree as ET
 import openai, psycopg
 from dotenv import load_dotenv
 from db_conn import resolve_database_conninfo
+from detect_policy import compute_final_score, passes_report_gate
 from trend_detection import run_bertrend_detection, describe_signals_with_llm
 from article_extractor import extract_article, should_extract
 from tactical_extraction import chunk_with_context, extract_tactical_patterns, extract_tactical_context
@@ -385,11 +386,7 @@ TRACKING_QUERY_PREFIXES = ("utm_", "fbclid", "gclid", "mc_", "ref", "source")
 
 
 def canonicalize_url(url: str) -> str:
-    """Return a canonical URL used for ingest diagnostics.
-
-    This does not affect dedupe behavior (which is currently source_key based);
-    it exists to make duplicate/new-source logs easier to reason about.
-    """
+    """Return a canonical URL used for ingest dedupe and diagnostics."""
     raw = (url or "").strip()
     if not raw:
         return ""
@@ -401,6 +398,35 @@ def canonicalize_url(url: str) -> str:
     ]
     normalized_path = parsed.path.rstrip("/") or "/"
     return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), normalized_path, urlencode(clean_query), ""))
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256((value or "").encode("utf-8")).hexdigest()
+
+
+def normalize_text_for_hash(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip()).lower()
+
+
+def build_source_dedupe_values(item: dict) -> dict:
+    canonical_url = canonicalize_url(item.get("url", ""))
+    normalized_content = normalize_text_for_hash(item.get("content", ""))
+    return {
+        "canonical_url": canonical_url,
+        "url_hash": _sha256_text(canonical_url) if canonical_url else "",
+        "content_hash": _sha256_text(normalized_content) if normalized_content else "",
+    }
+
+
+def normalize_trend_text(trend: str) -> str:
+    text = (trend or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def trend_fingerprint(trend: str) -> str:
+    normalized = normalize_trend_text(trend)
+    return _sha256_text(normalized) if normalized else ""
 
 # ══════════════════════════════════════════════
 # NewsBlur RSS ingestion
@@ -883,19 +909,40 @@ def source_exists_by_key(conn, source_key):
         cur.execute("SELECT 1 FROM sources WHERE source_key = %s", (source_key,))
         return cur.fetchone() is not None
 
+def find_existing_source(conn, source_key, url_hash="", content_hash=""):
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM sources WHERE source_key = %s LIMIT 1", (source_key,))
+        row = cur.fetchone()
+        if row:
+            return row[0], "source_key"
+
+        if url_hash:
+            cur.execute("SELECT id FROM sources WHERE url_hash = %s LIMIT 1", (url_hash,))
+            row = cur.fetchone()
+            if row:
+                return row[0], "url_hash"
+
+        if content_hash:
+            cur.execute("SELECT id FROM sources WHERE content_hash = %s LIMIT 1", (content_hash,))
+            row = cur.fetchone()
+            if row:
+                return row[0], "content_hash"
+
+    return None, None
+
 def store_source(conn, item, source_type):
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO sources (source_type, source_key, title, url, content, "
-            "author, publish_date, sitename, extraction_method) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "author, publish_date, sitename, extraction_method, canonical_url, url_hash, content_hash) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (source_key) DO NOTHING RETURNING id",
             (source_type, item["key"], item["title"], item["url"], item["content"],
              item.get("author"), item.get("publish_date"), item.get("sitename"),
-             item.get("extraction_method", "rss")),
+             item.get("extraction_method", "rss"), item.get("canonical_url"),
+             item.get("url_hash"), item.get("content_hash")),
         )
         row = cur.fetchone()
-        conn.commit()
         return row[0] if row else None
 
 
@@ -917,7 +964,6 @@ def set_source_embed_status(conn, source_id, status, error_message=None):
                 "WHERE id = %s",
                 (error_message[:500], source_id),
             )
-        conn.commit()
 
 def _sanitize_embedding_inputs(texts):
     """Normalize embedding inputs to OpenAI schema-safe strings.
@@ -1000,6 +1046,7 @@ def chunk_and_embed(conn, source_id, text):
     chunk_records = chunk_with_context(text)
     if not chunk_records:
         set_source_embed_status(conn, source_id, "embed_skipped", "No chunks produced from source content")
+        conn.commit()
         return
 
     chunk_texts = [c["content"] for c in chunk_records]
@@ -1007,6 +1054,7 @@ def chunk_and_embed(conn, source_id, text):
     if not vectors:
         log.warning("Skipping chunk insert for source_id=%s because embeddings were unavailable", source_id)
         set_source_embed_status(conn, source_id, "embed_failed", "Embeddings unavailable (request failed or rejected)")
+        conn.commit()
         return
 
     all_patterns = []
@@ -1049,15 +1097,15 @@ def chunk_and_embed(conn, source_id, text):
                      p.get("actor"), p["action"], p.get("context", "")[:300],
                      p.get("zones") or [], p.get("phase")),
                 )
-
-            conn.commit()
     except Exception as exc:
         conn.rollback()
         log.exception("Chunk embed/store failed for source_id=%s: %s", source_id, exc)
         set_source_embed_status(conn, source_id, "embed_failed", str(exc))
+        conn.commit()
         return
 
     set_source_embed_status(conn, source_id, "embedded")
+    conn.commit()
 
     if all_patterns:
         log.info("Extracted %d tactical patterns from source_id=%s", len(all_patterns), source_id)
@@ -1175,6 +1223,88 @@ def run_backfill(conn, lookback_days: int = 14, limit: int = 200) -> int:
         len(candidates),
     )
     return repaired
+
+
+def upsert_trend_candidate(conn, candidate: dict, feedback_adjustment: int):
+    fingerprint = trend_fingerprint(candidate["trend"])
+    base_score = int(candidate["score"])
+    novelty = candidate.get("novelty_score")
+    source_diversity = candidate.get("source_diversity", len(candidate.get("sources") or []))
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, status, feedback_adjustment, score, source_diversity FROM trend_candidates WHERE trend_fingerprint = %s LIMIT 1",
+            (fingerprint,),
+        )
+        existing = cur.fetchone()
+        if existing:
+            candidate_id, existing_status, existing_feedback, existing_score, existing_source_diversity = existing
+            stored_score = max(existing_score or 0, base_score)
+            stored_diversity = max(existing_source_diversity or 0, source_diversity)
+            stored_feedback = existing_feedback if existing_feedback not in (None, 0) else feedback_adjustment
+            final_score = compute_final_score(
+                base_score=stored_score,
+                novelty_score=novelty,
+                feedback_adjustment=stored_feedback,
+                source_diversity=stored_diversity,
+            )
+            next_status = "reported" if existing_status == "reported" else "pending"
+            cur.execute(
+                """
+                UPDATE trend_candidates
+                SET trend = %s,
+                    reasoning = %s,
+                    score = %s,
+                    feedback_adjustment = %s,
+                    final_score = %s,
+                    novelty_score = %s,
+                    source_diversity = %s,
+                    status = %s,
+                    detected_at = NOW()
+                WHERE id = %s
+                RETURNING id, final_score
+                """,
+                (
+                    candidate["trend"],
+                    candidate.get("reasoning"),
+                    stored_score,
+                    stored_feedback,
+                    final_score,
+                    novelty,
+                    stored_diversity,
+                    next_status,
+                    candidate_id,
+                ),
+            )
+            row = cur.fetchone()
+            return row[0], int(row[1] or final_score), stored_diversity
+
+        final_score = compute_final_score(
+            base_score=base_score,
+            novelty_score=novelty,
+            feedback_adjustment=feedback_adjustment,
+            source_diversity=source_diversity,
+        )
+        cur.execute(
+            """
+            INSERT INTO trend_candidates
+            (trend_fingerprint, trend, reasoning, score, feedback_adjustment, final_score, novelty_score, source_diversity)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id, final_score
+            """,
+            (
+                fingerprint,
+                candidate["trend"],
+                candidate.get("reasoning"),
+                base_score,
+                feedback_adjustment,
+                final_score,
+                novelty,
+                source_diversity,
+            ),
+        )
+        row = cur.fetchone()
+        return row[0], int(row[1] or final_score), source_diversity
 
 # ══════════════════════════════════════════════
 # Hybrid retrieval (semantic + keyword via RRF)
@@ -1812,7 +1942,7 @@ def decompose_topic(trend):
 # Step 2: Subagent — OODA retrieval loop (broad-to-narrow)
 # ══════════════════════════════════════════════
 
-def research_angle(conn, trend, task):
+def research_angle(conninfo, trend, task):
     """Subagent with OODA loop: Observe → Orient → Decide → Act.
 
     Mirrors Anthropic's subagent pattern:
@@ -1829,47 +1959,45 @@ def research_angle(conn, trend, task):
     max_rounds = task.get("max_rounds", 3)
     all_chunks = {}  # chunk_id -> row, deduplicated
 
-    for round_num in range(max_rounds):
-        # ACT: retrieve with current query
-        query = queries[round_num] if round_num < len(queries) else queries[-1]
-        log.info("  Subagent '%s' round %d/%d: query='%s'", angle, round_num + 1, max_rounds, query[:60])
-        rows = hybrid_search(conn, query, limit=15)
-        for row in rows:
-            all_chunks[row[0]] = row
+    with psycopg.connect(conninfo) as conn:
+        for round_num in range(max_rounds):
+            query = queries[round_num] if round_num < len(queries) else queries[-1]
+            log.info("  Subagent '%s' round %d/%d: query='%s'", angle, round_num + 1, max_rounds, query[:60])
+            rows = hybrid_search(conn, query, limit=15)
+            for row in rows:
+                all_chunks[row[0]] = row
 
-        if not all_chunks:
-            continue
+            if not all_chunks:
+                continue
 
-        # OBSERVE + ORIENT: evaluate what we have vs what we need
-        chunk_json = chunks_to_context(list(all_chunks.values()))
-        try:
-            eval_text = ask(
-                SYS_OODA_EVAL,
+            chunk_json = chunks_to_context(list(all_chunks.values()))
+            try:
+                eval_text = ask(
+                    SYS_OODA_EVAL,
 
-                f"Angle: {angle}\n"
-                f"Objective: {objective}\n"
-                f"Round: {round_num + 1}/{max_rounds}\n"
-                f"Previous queries: {json.dumps(queries[:round_num + 1])}\n\n"
-                f"Chunks collected ({len(all_chunks)} total):\n{chunk_json}\n\n"
-                'Return JSON: {{"sufficient": true/false, "coverage_pct": 0-100, '
-                '"gaps": ["specific gap 1", ...], "next_query": "narrower query" or null}}',
-                model=EVAL_MODEL,
-            )
-            eval_result = parse_json(eval_text)
-        except Exception:
-            break
+                    f"Angle: {angle}\n"
+                    f"Objective: {objective}\n"
+                    f"Round: {round_num + 1}/{max_rounds}\n"
+                    f"Previous queries: {json.dumps(queries[:round_num + 1])}\n\n"
+                    f"Chunks collected ({len(all_chunks)} total):\n{chunk_json}\n\n"
+                    'Return JSON: {{"sufficient": true/false, "coverage_pct": 0-100, '
+                    '"gaps": ["specific gap 1", ...], "next_query": "narrower query" or null}}',
+                    model=EVAL_MODEL,
+                )
+                eval_result = parse_json(eval_text)
+            except Exception:
+                break
 
-        coverage = eval_result.get("coverage_pct", 0)
-        log.info("  Subagent '%s' coverage: %d%%, sufficient: %s",
-                 angle, coverage, eval_result.get("sufficient"))
+            coverage = eval_result.get("coverage_pct", 0)
+            log.info("  Subagent '%s' coverage: %d%%, sufficient: %s",
+                     angle, coverage, eval_result.get("sufficient"))
 
-        if eval_result.get("sufficient", False) or round_num == max_rounds - 1:
-            break
+            if eval_result.get("sufficient", False) or round_num == max_rounds - 1:
+                break
 
-        # DECIDE: use narrower query for next round
-        next_q = eval_result.get("next_query")
-        if next_q:
-            queries.append(next_q)
+            next_q = eval_result.get("next_query")
+            if next_q:
+                queries.append(next_q)
 
     last_coverage = eval_result.get("coverage_pct", 50) if 'eval_result' in dir() else 50
 
@@ -1899,11 +2027,14 @@ def research_angle(conn, trend, task):
     return {"angle": angle, "summary": summary, "chunks": list(all_chunks.values()),
             "coverage": last_coverage}
 
-def run_subagents(conn, trend, tasks):
+def run_subagents(trend, tasks):
     """Run subagent research in parallel with bounded concurrency."""
+    conninfo, reason = resolve_database_conninfo()
+    if not conninfo:
+        raise RuntimeError(f"database_unavailable:{reason}")
     results = []
     with ThreadPoolExecutor(max_workers=min(len(tasks), 4)) as pool:
-        futures = {pool.submit(research_angle, conn, trend, task): task for task in tasks}
+        futures = {pool.submit(research_angle, conninfo, trend, task): task for task in tasks}
         for future in as_completed(futures):
             try:
                 results.append(future.result())
@@ -2112,7 +2243,7 @@ def generate_report(conn, trend):
         # ── Step 2: Parallel subagent research (OODA retrieval) ──
         round_label = f"Round {research_round + 1}"
         log.info("Step 2 (%s): Running %d subagents in parallel...", round_label, len(tasks))
-        results = run_subagents(conn, trend, tasks)
+        results = run_subagents(trend, tasks)
         all_subagent_results.extend(results)
 
         # ── Step 3: Synthesis ──
@@ -2230,17 +2361,18 @@ def run_ingest(conn):
     for item in fetch_newsblur(since_ts=since_ts):
         candidates_found += 1
         articles_extracted += 1
+        item.update(build_source_dedupe_values(item))
         dedupe_key = item["key"]
-        canonical_url = canonicalize_url(item.get("url", ""))
-        existed = source_exists_by_key(conn, dedupe_key)
-        sid = store_source(conn, item, "rss")
-        if sid:
+        canonical_url = item.get("canonical_url", "")
+        existing_id, existing_reason = find_existing_source(conn, dedupe_key, item.get("url_hash", ""), item.get("content_hash", ""))
+        if existing_id is None:
+            sid = store_source(conn, item, "rss")
             log.info("Ingest decision=new source_type=rss dedupe_key=%s canonical_url=%s", dedupe_key, canonical_url)
             chunk_and_embed(conn, sid, item["content"])
             new += 1
-        elif existed:
+        elif existing_reason:
             duplicates += 1
-            log.info("Ingest decision=duplicate source_type=rss dedupe_key=%s canonical_url=%s", dedupe_key, canonical_url)
+            log.info("Ingest decision=duplicate source_type=rss dedupe_key=%s canonical_url=%s duplicate_by=%s", dedupe_key, canonical_url, existing_reason)
         else:
             skipped += 1
             log.info("Ingest decision=skipped source_type=rss dedupe_key=%s canonical_url=%s", dedupe_key, canonical_url)
@@ -2254,17 +2386,18 @@ def run_ingest(conn):
             continue
         for item in yt_items:
             candidates_found += 1
+            item.update(build_source_dedupe_values(item))
             dedupe_key = item["key"]
-            canonical_url = canonicalize_url(item.get("url", ""))
-            existed = source_exists_by_key(conn, dedupe_key)
-            sid = store_source(conn, item, "youtube")
-            if sid:
+            canonical_url = item.get("canonical_url", "")
+            existing_id, existing_reason = find_existing_source(conn, dedupe_key, item.get("url_hash", ""), item.get("content_hash", ""))
+            if existing_id is None:
+                sid = store_source(conn, item, "youtube")
                 log.info("Ingest decision=new source_type=youtube dedupe_key=%s canonical_url=%s", dedupe_key, canonical_url)
                 chunk_and_embed(conn, sid, item["content"])
                 new += 1
-            elif existed:
+            elif existing_reason:
                 duplicates += 1
-                log.info("Ingest decision=duplicate source_type=youtube dedupe_key=%s canonical_url=%s", dedupe_key, canonical_url)
+                log.info("Ingest decision=duplicate source_type=youtube dedupe_key=%s canonical_url=%s duplicate_by=%s", dedupe_key, canonical_url, existing_reason)
             else:
                 skipped += 1
                 log.info("Ingest decision=skipped source_type=youtube dedupe_key=%s canonical_url=%s", dedupe_key, canonical_url)
@@ -2341,38 +2474,13 @@ def run_detect(conn, min_new_sources=0, backfill_days: int | None = None, backfi
             stored_scores = []
             for c in candidates:
                 feedback_adjustment = _feedback_adjustment_for_trend(c["trend"], keyword_weights, feedback_embeddings)
-                base_score = int(c["score"])
-                novelty = c.get("novelty_score")
-
-                # Novelty bonus/penalty: high novelty boosts score, low novelty suppresses
-                novelty_adjustment = 0
-                if novelty is not None:
-                    # Scale: novelty 0.0 → -15, novelty 0.5 → 0, novelty 1.0 → +15
-                    novelty_adjustment = int(round((novelty - 0.5) * 30))
-
-                final_score = max(0, min(100, base_score + feedback_adjustment + novelty_adjustment))
-                source_diversity = c.get("source_diversity", len(c.get("sources") or []))
-
-                cur.execute(
-                    "INSERT INTO trend_candidates "
-                    "(trend, reasoning, score, feedback_adjustment, final_score, "
-                    "novelty_score, source_diversity) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
-                    (c["trend"], c.get("reasoning"), base_score, feedback_adjustment,
-                     final_score, novelty, source_diversity),
-                )
-                trend_candidate_id = cur.fetchone()[0]
+                trend_candidate_id, final_score, _ = upsert_trend_candidate(conn, c, feedback_adjustment)
                 for source in c.get("sources") or []:
                     cur.execute(
                         "INSERT INTO trend_candidate_sources (trend_candidate_id, source_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                         (trend_candidate_id, source["source_id"]),
                     )
                 stored_scores.append(final_score)
-
-                # Update novelty baseline so future similar concepts register as less novel
-                trend_vec = c.get("_embedding")
-                if trend_vec:
-                    update_baseline(conn, c["trend"], trend_vec, source_count=source_diversity)
 
         conn.commit()
         log.info("Stored %d trend candidates (top final score: %d)", len(candidates), max(stored_scores))
@@ -2397,7 +2505,7 @@ def run_report(conn):
         cur.execute(
             "SELECT id, trend, COALESCE(final_score, score) AS effective_score, "
             "COALESCE(source_diversity, 0) AS src_div "
-            "FROM trend_candidates WHERE status = 'pending' "
+            "FROM trend_candidates WHERE status IN ('pending', 'needs_more_evidence') "
             "ORDER BY COALESCE(final_score, score) DESC, detected_at DESC LIMIT 5"
         )
         rows = cur.fetchall()
@@ -2411,7 +2519,12 @@ def run_report(conn):
     skipped_ids = []
     for row in rows:
         cid, trend, eff_score, src_div = row
-        if eff_score >= min_score and src_div >= min_sources:
+        if passes_report_gate(
+            final_score=eff_score,
+            source_diversity=src_div,
+            min_score=min_score,
+            min_sources=min_sources,
+        ):
             chosen = (cid, trend, eff_score, src_div)
             break
         else:
@@ -2424,7 +2537,7 @@ def run_report(conn):
         with conn.cursor() as cur:
             placeholders = ",".join(["%s"] * len(skipped_ids))
             cur.execute(
-                f"UPDATE trend_candidates SET status = 'skipped' WHERE id IN ({placeholders})",
+                f"UPDATE trend_candidates SET status = 'needs_more_evidence' WHERE id IN ({placeholders})",
                 skipped_ids,
             )
         conn.commit()
@@ -2437,6 +2550,9 @@ def run_report(conn):
     candidate_id, trend, eff_score, src_div = chosen
     log.info("Generating report for trend: %s (score=%d, sources=%d)", trend, eff_score, src_div)
     generate_report(conn, trend)
+    trend_vecs = embed([trend])
+    if trend_vecs and trend_vecs[0]:
+        update_baseline(conn, trend, trend_vecs[0], source_count=src_div)
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE trend_candidates SET status = 'reported' WHERE id = %s",

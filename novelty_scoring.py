@@ -127,7 +127,6 @@ def update_baseline(conn, trend_text, trend_embedding, source_count=1):
                 "WHERE id = %s",
                 (new_occ, new_src, baseline_id),
             )
-        conn.commit()
         log.debug("Updated novelty baseline #%d: '%s' (occurrences=%d)",
                   baseline_id, existing[1][:40], new_occ)
     else:
@@ -138,7 +137,6 @@ def update_baseline(conn, trend_text, trend_embedding, source_count=1):
                 "VALUES (%s, %s::vector, %s)",
                 (trend_text[:500], vec_literal, source_count),
             )
-        conn.commit()
         log.debug("Added new novelty baseline: '%s'", trend_text[:60])
 
 

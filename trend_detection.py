@@ -69,7 +69,7 @@ def _fetch_chunks_by_window(conn, lookback_days, window_days):
         cur.execute(
             "SELECT c.id, c.source_id, c.content, c.embedding::text, s.created_at "
             "FROM chunks c JOIN sources s ON c.source_id = s.id "
-            "WHERE s.created_at > NOW() - INTERVAL '%s days' "
+            "WHERE s.created_at > NOW() - make_interval(days => %s) "
             "AND c.embedding IS NOT NULL "
             "ORDER BY s.created_at",
             (lookback_days,),
@@ -80,19 +80,19 @@ def _fetch_chunks_by_window(conn, lookback_days, window_days):
         # Diagnostic queries to help identify why no embeddings were found
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT COUNT(*) FROM sources WHERE created_at > NOW() - INTERVAL '%s days'",
+                "SELECT COUNT(*) FROM sources WHERE created_at > NOW() - make_interval(days => %s)",
                 (lookback_days,),
             )
             source_count = cur.fetchone()[0]
             cur.execute(
                 "SELECT COUNT(*) FROM chunks c JOIN sources s ON c.source_id = s.id "
-                "WHERE s.created_at > NOW() - INTERVAL '%s days'",
+                "WHERE s.created_at > NOW() - make_interval(days => %s)",
                 (lookback_days,),
             )
             chunk_count = cur.fetchone()[0]
             cur.execute(
                 "SELECT COUNT(*) FROM chunks c JOIN sources s ON c.source_id = s.id "
-                "WHERE s.created_at > NOW() - INTERVAL '%s days' AND c.embedding IS NOT NULL",
+                "WHERE s.created_at > NOW() - make_interval(days => %s) AND c.embedding IS NOT NULL",
                 (lookback_days,),
             )
             embedded_count = cur.fetchone()[0]

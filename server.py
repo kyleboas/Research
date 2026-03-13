@@ -13,16 +13,31 @@ import psycopg
 from dotenv import load_dotenv
 
 from db_conn import resolve_database_conninfo
+from detect_policy import compute_final_score
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
 PORT = int(os.environ.get("PORT", 8080))
 
+RUN_COMMANDS = {
+    "ingest": [sys.executable, str(ROOT / "main.py"), "--step", "ingest"],
+    "detect": [sys.executable, str(ROOT / "main.py"), "--step", "detect"],
+    "report": [sys.executable, str(ROOT / "main.py"), "--step", "report"],
+    "detect_policy_eval": [sys.executable, str(ROOT / "autoresearch_detect" / "eval_detect.py")],
+    "detect_policy_optimize": [
+        sys.executable,
+        str(ROOT / "autoresearch_detect" / "optimize_detect_policy.py"),
+        "--refresh-auto",
+        "--apply",
+    ],
+}
 _run_lock = Lock()
 _step_runs = {
     "ingest": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
     "detect": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
     "report": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
+    "detect_policy_eval": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
+    "detect_policy_optimize": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
 }
 _active_processes = {}
 
@@ -82,13 +97,13 @@ def _step_runs_snapshot():
 def _start_step_run(step):
     _refresh_step_runs()
     with _run_lock:
-        if step not in _step_runs:
+        if step not in RUN_COMMANDS:
             return False, "invalid_step"
         if any(meta["proc"].poll() is None for meta in _active_processes.values()):
             return False, "another_step_running"
 
         log_file = tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", delete=False)
-        cmd = [sys.executable, str(ROOT / "main.py"), "--step", step]
+        cmd = RUN_COMMANDS[step]
         proc = subprocess.Popen(
             cmd,
             cwd=ROOT,
@@ -148,6 +163,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         cur.execute(
             """
             ALTER TABLE trend_candidates
+                ADD COLUMN IF NOT EXISTS trend_fingerprint TEXT,
                 ADD COLUMN IF NOT EXISTS feedback_adjustment INT NOT NULL DEFAULT 0,
                 ADD COLUMN IF NOT EXISTS final_score INT
             """
@@ -551,13 +567,23 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     """
                     UPDATE trend_candidates
                     SET feedback_adjustment = feedback_adjustment + %s,
-                        final_score = GREATEST(0, LEAST(100, score + feedback_adjustment + %s))
+                        status = CASE WHEN status = 'reported' THEN 'reported' ELSE 'pending' END
                     WHERE id = %s
-                    RETURNING score, feedback_adjustment, COALESCE(final_score, score)
+                    RETURNING score, feedback_adjustment, novelty_score, COALESCE(source_diversity, 0), status
                     """,
-                    (delta, delta, trend_candidate_id),
+                    (delta, trend_candidate_id),
                 )
                 updated = cur.fetchone()
+                final_score = compute_final_score(
+                    base_score=updated[0],
+                    novelty_score=updated[2],
+                    feedback_adjustment=updated[1],
+                    source_diversity=updated[3],
+                )
+                cur.execute(
+                    "UPDATE trend_candidates SET final_score = %s WHERE id = %s",
+                    (final_score, trend_candidate_id),
+                )
             conn.commit()
 
         self._send_json(
@@ -566,7 +592,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 "trend_candidate_id": trend_candidate_id,
                 "base_score": updated[0],
                 "feedback_adjustment": updated[1],
-                "score": updated[2],
+                "score": final_score,
             }
         )
 
