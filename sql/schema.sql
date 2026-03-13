@@ -81,11 +81,19 @@ CREATE TABLE IF NOT EXISTS ingest_policy_runs (
     min_improvement DOUBLE PRECISION NOT NULL DEFAULT 0,
     applied BOOLEAN NOT NULL DEFAULT FALSE,
     apply_decision TEXT NOT NULL DEFAULT '',
+    optimization_type TEXT NOT NULL DEFAULT 'bayesian',
+    n_trials INTEGER NOT NULL DEFAULT 0,
     observations JSONB NOT NULL DEFAULT '{}'::jsonb,
     baseline_policy JSONB NOT NULL DEFAULT '{}'::jsonb,
     best_policy JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE ingest_policy_runs
+    ADD COLUMN IF NOT EXISTS optimization_type TEXT NOT NULL DEFAULT 'bayesian';
+
+ALTER TABLE ingest_policy_runs
+    ADD COLUMN IF NOT EXISTS n_trials INTEGER NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS pipeline_state (
     key TEXT PRIMARY KEY,
@@ -246,6 +254,23 @@ ALTER TABLE trend_candidates
     ADD COLUMN IF NOT EXISTS novelty_score DOUBLE PRECISION,
     ADD COLUMN IF NOT EXISTS source_diversity INT DEFAULT 0,
     ADD COLUMN IF NOT EXISTS pattern_ids BIGINT[];
+
+-- Trajectory tracking for early-trend detection
+ALTER TABLE trend_candidates
+    ADD COLUMN IF NOT EXISTS velocity_score DOUBLE PRECISION DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS acceleration_score DOUBLE PRECISION DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS trajectory_direction TEXT DEFAULT 'flat',
+    ADD COLUMN IF NOT EXISTS early_trend_score DOUBLE PRECISION DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS trajectory_reasoning TEXT;
+
+-- Source qualification policy columns
+ALTER TABLE trend_candidates
+    ADD COLUMN IF NOT EXISTS weak_signal BOOLEAN DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS authority_classification TEXT DEFAULT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_trend_candidates_early_trend ON trend_candidates (early_trend_score DESC NULLS LAST);
+CREATE INDEX IF NOT EXISTS idx_trend_candidates_trajectory ON trend_candidates (trajectory_direction, early_trend_score DESC NULLS LAST);
+CREATE INDEX IF NOT EXISTS idx_trend_candidates_weak_signal ON trend_candidates (weak_signal) WHERE weak_signal = TRUE;
 
 -- BERTrend topic tracker state (JSON snapshot of TopicTracker)
 CREATE TABLE IF NOT EXISTS topic_snapshots (
