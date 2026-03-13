@@ -4,8 +4,10 @@ from server import (
     _format_detect_candidates_notification,
     _format_eval_notification,
     _format_optimize_notification,
+    _format_report_eval_notification,
     _parse_eval_summary,
     _parse_optimize_summary,
+    _parse_report_eval_summary,
 )
 
 
@@ -84,6 +86,50 @@ class ServerNotificationTests(unittest.TestCase):
         self.assertIn("Score: 88.50 -> 92.50", message)
         self.assertIn("Delta: +4.00", message)
         self.assertIn("Policy changed: yes", message)
+
+    def test_parse_report_eval_summary_extracts_scores(self):
+        summary = _parse_report_eval_summary(
+            "\n".join(
+                [
+                    "fixture=/tmp/reports.json",
+                    "policy=/tmp/report_policy_config.json",
+                    "average_item_score=78.25",
+                    "section_coverage=0.8750",
+                    "citation_validity=0.9500",
+                    "citation_density=0.7000",
+                    "source_diversity=0.6667",
+                    "sources_section_coverage=0.8000",
+                    "counterevidence_coverage=0.5000",
+                    "thoroughness=0.7200",
+                    "FINAL_SCORE=78.25",
+                ]
+            )
+        )
+
+        self.assertEqual(summary["fixture"], "/tmp/reports.json")
+        self.assertEqual(summary["policy"], "/tmp/report_policy_config.json")
+        self.assertEqual(summary["average_item_score"], 78.25)
+        self.assertEqual(summary["section_coverage"], 0.875)
+        self.assertEqual(summary["citation_validity"], 0.95)
+        self.assertEqual(summary["final_score"], 78.25)
+
+    def test_format_report_eval_notification_is_concise(self):
+        message = _format_report_eval_notification(
+            {
+                "average_item_score": 78.25,
+                "section_coverage": 0.875,
+                "citation_validity": 0.95,
+                "thoroughness": 0.72,
+                "final_score": 78.25,
+            }
+        )
+
+        self.assertIn("Report quality eval finished.", message)
+        self.assertIn("Final score: 78.25", message)
+        self.assertIn("Average item score: 78.25", message)
+        self.assertIn("Citation validity: 0.9500", message)
+        self.assertIn("Section coverage: 0.8750", message)
+        self.assertIn("Thoroughness: 0.7200", message)
 
     def test_format_detect_candidates_notification_limits_lines(self):
         candidates = [

@@ -27,6 +27,11 @@ RUN_COMMANDS = {
     "detect": [sys.executable, str(ROOT / "main.py"), "--step", "detect"],
     "rescore": [sys.executable, str(ROOT / "main.py"), "--step", "rescore"],
     "report": [sys.executable, str(ROOT / "main.py"), "--step", "report"],
+    "report_policy_eval": [
+        sys.executable,
+        str(ROOT / "autoresearch_report" / "eval_report.py"),
+        "--refresh-auto",
+    ],
     "detect_policy_eval": [sys.executable, str(ROOT / "autoresearch_detect" / "eval_detect.py")],
     "detect_policy_optimize": [
         sys.executable,
@@ -41,6 +46,7 @@ _step_runs = {
     "detect": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
     "rescore": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
     "report": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
+    "report_policy_eval": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
     "detect_policy_eval": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
     "detect_policy_optimize": {"status": "idle", "started_at": None, "finished_at": None, "exit_code": None, "log_tail": ""},
 }
@@ -137,6 +143,50 @@ def _format_eval_notification(summary):
         lines.append(f"• Gate accuracy: {summary['gate_accuracy']:.4f}")
     if summary.get("report_recall") is not None:
         lines.append(f"• Report recall: {summary['report_recall']:.4f}")
+    return "\n".join(lines)
+
+
+def _parse_report_eval_summary(log_text):
+    text = str(log_text or "")
+    patterns = {
+        "fixture": r"fixture=(.+)",
+        "policy": r"policy=(.+)",
+        "average_item_score": r"average_item_score=(\d+\.\d+)",
+        "section_coverage": r"section_coverage=(\d+\.\d+)",
+        "citation_validity": r"citation_validity=(\d+\.\d+)",
+        "citation_density": r"citation_density=(\d+\.\d+)",
+        "source_diversity": r"source_diversity=(\d+\.\d+)",
+        "sources_section_coverage": r"sources_section_coverage=(\d+\.\d+)",
+        "counterevidence_coverage": r"counterevidence_coverage=(\d+\.\d+)",
+        "thoroughness": r"thoroughness=(\d+\.\d+)",
+        "final_score": r"FINAL_SCORE=(\d+\.\d+)",
+    }
+    result = {}
+    for key, pattern in patterns.items():
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        if key in {"fixture", "policy"}:
+            result[key] = match.group(1).strip()
+        else:
+            result[key] = float(match.group(1))
+    return result
+
+
+def _format_report_eval_notification(summary):
+    if not summary:
+        return "Report quality eval finished."
+    lines = ["Report quality eval finished."]
+    if summary.get("final_score") is not None:
+        lines.append(f"• Final score: {summary['final_score']:.2f}")
+    if summary.get("average_item_score") is not None:
+        lines.append(f"• Average item score: {summary['average_item_score']:.2f}")
+    if summary.get("citation_validity") is not None:
+        lines.append(f"• Citation validity: {summary['citation_validity']:.4f}")
+    if summary.get("section_coverage") is not None:
+        lines.append(f"• Section coverage: {summary['section_coverage']:.4f}")
+    if summary.get("thoroughness") is not None:
+        lines.append(f"• Thoroughness: {summary['thoroughness']:.4f}")
     return "\n".join(lines)
 
 
@@ -242,6 +292,8 @@ def _notify_step_completion(step, run_meta, state):
         baseline = run_meta.get("baseline") or {}
         candidates = _load_new_detect_candidates(baseline.get("max_trend_candidate_id", 0))
         message = _format_detect_candidates_notification(candidates)
+    elif step == "report_policy_eval":
+        message = _format_report_eval_notification(_parse_report_eval_summary(_read_log_text(run_meta.get("log_path"))))
     elif step == "detect_policy_eval":
         message = _format_eval_notification(_parse_eval_summary(_read_log_text(run_meta.get("log_path"))))
     elif step == "detect_policy_optimize":
