@@ -6,6 +6,9 @@ CREATE TABLE IF NOT EXISTS sources (
     source_key TEXT NOT NULL UNIQUE,
     title TEXT,
     url TEXT,
+    canonical_url TEXT,
+    url_hash TEXT,
+    content_hash TEXT,
     content TEXT NOT NULL,
     author TEXT,
     publish_date DATE,
@@ -24,7 +27,10 @@ ALTER TABLE sources
     ADD COLUMN IF NOT EXISTS publish_date DATE,
     ADD COLUMN IF NOT EXISTS sitename TEXT,
     ADD COLUMN IF NOT EXISTS extraction_method TEXT DEFAULT 'rss',
-    ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::JSONB;
+    ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::JSONB,
+    ADD COLUMN IF NOT EXISTS canonical_url TEXT,
+    ADD COLUMN IF NOT EXISTS url_hash TEXT,
+    ADD COLUMN IF NOT EXISTS content_hash TEXT;
 
 CREATE TABLE IF NOT EXISTS chunks (
     id BIGSERIAL PRIMARY KEY,
@@ -53,16 +59,65 @@ CREATE TABLE IF NOT EXISTS pipeline_state (
 
 CREATE TABLE IF NOT EXISTS trend_candidates (
     id          BIGSERIAL PRIMARY KEY,
+    trend_fingerprint TEXT,
     trend       TEXT NOT NULL,
     reasoning   TEXT,
     score       INT NOT NULL CHECK (score BETWEEN 0 AND 100),
-    status      TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'reported', 'skipped')),
+    status      TEXT NOT NULL DEFAULT 'pending',
     detected_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 ALTER TABLE trend_candidates
+    ADD COLUMN IF NOT EXISTS trend_fingerprint TEXT,
     ADD COLUMN IF NOT EXISTS feedback_adjustment INT NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS final_score INT;
+
+DO $$
+BEGIN
+    UPDATE trend_candidates
+    SET status = 'needs_more_evidence'
+    WHERE status = 'skipped';
+EXCEPTION
+    WHEN undefined_table THEN
+        NULL;
+END $$;
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'trend_candidates'::regclass
+          AND conname = 'trend_candidates_status_check'
+    ) THEN
+        ALTER TABLE trend_candidates DROP CONSTRAINT trend_candidates_status_check;
+    END IF;
+EXCEPTION
+    WHEN undefined_table THEN
+        NULL;
+END $$;
+
+DO $$
+DECLARE
+    constraint_name TEXT;
+BEGIN
+    FOR constraint_name IN
+        SELECT c.conname
+        FROM pg_constraint c
+        WHERE c.conrelid = 'trend_candidates'::regclass
+          AND c.contype = 'c'
+          AND pg_get_constraintdef(c.oid) LIKE '%status%'
+    LOOP
+        EXECUTE format('ALTER TABLE trend_candidates DROP CONSTRAINT %I', constraint_name);
+    END LOOP;
+EXCEPTION
+    WHEN undefined_table THEN
+        NULL;
+END $$;
+
+ALTER TABLE trend_candidates
+    ADD CONSTRAINT trend_candidates_status_check
+    CHECK (status IN ('pending', 'reported', 'needs_more_evidence'));
 
 CREATE TABLE IF NOT EXISTS trend_candidate_sources (
     trend_candidate_id BIGINT NOT NULL REFERENCES trend_candidates(id) ON DELETE CASCADE,
@@ -83,10 +138,13 @@ CREATE TABLE IF NOT EXISTS trend_feedback (
 -- Indexes for hybrid search
 CREATE INDEX IF NOT EXISTS idx_trend_candidates_status_score ON trend_candidates (status, score DESC);
 CREATE INDEX IF NOT EXISTS idx_trend_candidates_final_score ON trend_candidates (COALESCE(final_score, score) DESC, detected_at DESC);
+CREATE INDEX IF NOT EXISTS idx_trend_candidates_fingerprint ON trend_candidates (trend_fingerprint);
 CREATE INDEX IF NOT EXISTS idx_trend_feedback_created_at ON trend_feedback (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
 CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON chunks USING GIN (search_tsv);
 CREATE INDEX IF NOT EXISTS idx_sources_tsv ON sources USING GIN (search_tsv);
+CREATE INDEX IF NOT EXISTS idx_sources_url_hash ON sources (url_hash);
+CREATE INDEX IF NOT EXISTS idx_sources_content_hash ON sources (content_hash);
 
 -- Tactical patterns extracted from chunks (actor → action → context)
 CREATE TABLE IF NOT EXISTS tactical_patterns (

@@ -214,6 +214,62 @@ The dashboard can:
 - trigger pipeline steps (`/api/run-step`),
 - record trend feedback (`/api/trend-feedback`).
 
+## Detect-policy tuning loop
+
+The detect layer now has a local, non-LLM tuning loop. It does not call paid APIs.
+
+Live policy files:
+
+- `detect_policy.py`
+- `detect_policy_config.json`
+
+Harness files:
+
+- `autoresearch_detect/program.md`
+- `autoresearch_detect/eval_detect.py`
+- `autoresearch_detect/evaluator.py`
+- `autoresearch_detect/export_candidates_snapshot.py`
+- `autoresearch_detect/optimize_detect_policy.py`
+- `autoresearch_detect/fixtures/candidates.json`
+
+Run the evaluator on the starter fixture:
+
+```bash
+.venv/bin/python autoresearch_detect/eval_detect.py
+```
+
+Export a real candidate snapshot for manual labeling:
+
+```bash
+.venv/bin/python autoresearch_detect/export_candidates_snapshot.py \
+  --output autoresearch_detect/fixtures/live_candidates.json
+```
+
+Export a snapshot with obvious labels inferred from report status and feedback:
+
+```bash
+.venv/bin/python autoresearch_detect/export_candidates_snapshot.py \
+  --label-mode auto \
+  --output autoresearch_detect/fixtures/live_candidates.auto.json
+```
+
+Evaluate any labeled fixture:
+
+```bash
+.venv/bin/python autoresearch_detect/eval_detect.py \
+  --fixture autoresearch_detect/fixtures/live_candidates.json
+```
+
+Search for better detect settings and apply them to the live pipeline:
+
+```bash
+.venv/bin/python autoresearch_detect/optimize_detect_policy.py \
+  --refresh-auto \
+  --apply
+```
+
+That tuning command exports an auto-labeled snapshot from the DB, searches a grid of scoring and gate settings, and writes the best result back to `detect_policy_config.json`. Because the main detect flow and dashboard feedback path both read that config, the tuned policy affects live candidate ranking and report gating for future runs.
+
 ## Suggested cron split
 
 ```bash
