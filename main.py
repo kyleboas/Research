@@ -6,14 +6,14 @@ Architecture mirrors Anthropic's production research system:
   → Synthesis → Sufficiency evaluation → optional re-plan → CitationAgent → Revision
 """
 
-import argparse, hashlib, json, logging, math, os, platform, random, re, socket, time
+import argparse, base64, hashlib, json, logging, math, os, platform, random, re, socket, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 from http.cookiejar import CookieJar
 from pathlib import Path
 from typing import Optional
 from urllib.error import HTTPError
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen, build_opener, HTTPCookieProcessor
 import xml.etree.ElementTree as ET
 
@@ -63,6 +63,9 @@ CLOUDFLARE_GATEWAY_TOKEN = os.environ.get("CLOUDFLARE_GATEWAY_TOKEN", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "kyleboas/research").strip()
+GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main").strip() or "main"
 
 # ── Config file (config.json) overrides env-var model defaults ────────────────
 _cfg_path = ROOT / "config.json"
@@ -1523,6 +1526,155 @@ def _write_text(path: Path, content: str):
     path.write_text(content)
 
 
+def _strip_markdown_to_text(value: str) -> str:
+    text = str(value or "")
+    text = re.sub(r"^---\s*[\s\S]*?\n---\s*", "", text, flags=re.M)
+    text = re.sub(r"<!---?more--->", " ", text, flags=re.I)
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"\[S\d+:C\d+\]", "", text)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"^[#>\-\*\d\.\s]+", "", text, flags=re.M)
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    text = re.sub(r"\*([^*]+)\*", r"\1", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _truncate_chars(text: str, limit: int) -> str:
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(normalized) <= limit:
+        return normalized
+    shortened = normalized[: max(0, limit - 1)].rstrip()
+    return f"{shortened}…"
+
+
+def _report_summary(report_body: str, *, limit: int = 255) -> str:
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", str(report_body or "")) if part.strip()]
+    candidates = []
+    for part in paragraphs:
+        if part.lstrip().startswith("#"):
+            continue
+        plain = _strip_markdown_to_text(part)
+        if plain:
+            candidates.append(plain)
+    summary_source = candidates[0] if candidates else _strip_markdown_to_text(report_body)
+    return _truncate_chars(summary_source or "No summary available.", limit)
+
+
+def _report_category(title: str, report_body: str) -> str:
+    haystack = f"{title}\n{report_body}".lower()
+    category_map = [
+        ("Premier League", ["premier league"]),
+        ("Champions League", ["champions league"]),
+        ("Europa League", ["europa league"]),
+        ("Conference League", ["conference league"]),
+        ("La Liga", ["la liga"]),
+        ("Serie A", ["serie a"]),
+        ("Bundesliga", ["bundesliga"]),
+        ("Ligue 1", ["ligue 1"]),
+        ("MLS", ["major league soccer", "mls"]),
+        ("NWSL", ["nwsl"]),
+        ("Women's Super League", ["women's super league", "wsl"]),
+        ("FA Cup", ["fa cup"]),
+        ("Championship", ["efl championship", "championship"]),
+    ]
+    for label, needles in category_map:
+        if any(needle in haystack for needle in needles):
+            return label
+    return "General"
+
+
+def _report_post_relative_path(title: str, created_at: datetime) -> str:
+    stamp = created_at.astimezone(UTC)
+    slug = _slugify(title, "report")[:80]
+    return f"_posts/{stamp.strftime('%Y')}/{stamp.strftime('%m')}/{stamp.strftime('%Y-%m-%d')}-{slug}.md"
+
+
+def _report_post_content(title: str, report_body: str, *, created_at: datetime, category: str) -> str:
+    stamp = created_at.astimezone(UTC)
+    summary = _report_summary(report_body)
+    body = str(report_body or "").strip()
+    front_matter = [
+        "---",
+        "layout: post",
+        f"date: {stamp.strftime('%Y-%m-%d %H:%M UTC')}",
+        f"title: {json.dumps(title or 'Untitled report', ensure_ascii=False)}",
+        "categories:",
+        f"- {json.dumps(category or 'General', ensure_ascii=False)}",
+        "---",
+        "",
+        summary,
+        "",
+        "<!---more--->",
+        "",
+        body,
+        "",
+    ]
+    return "\n".join(front_matter)
+
+
+def _github_blob_url(path: str, *, repo: str | None = None, branch: str | None = None) -> str:
+    resolved_repo = (repo or GITHUB_REPO or "").strip()
+    resolved_branch = (branch or GITHUB_BRANCH or "main").strip() or "main"
+    if not resolved_repo:
+        return ""
+    return f"https://github.com/{resolved_repo}/blob/{resolved_branch}/{path}"
+
+
+def _github_request(url: str, *, method: str = "GET", payload: dict | None = None):
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "research-bot",
+    }
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+    body = None
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = Request(url, data=body, headers=headers, method=method)
+    with urlopen(req, timeout=30) as response:
+        return json.loads(response.read().decode("utf-8") or "{}")
+
+
+def _github_existing_file_sha(path: str, *, repo: str | None = None, branch: str | None = None) -> str | None:
+    resolved_repo = (repo or GITHUB_REPO or "").strip()
+    resolved_branch = (branch or GITHUB_BRANCH or "main").strip() or "main"
+    if not resolved_repo:
+        return None
+    url = f"https://api.github.com/repos/{resolved_repo}/contents/{quote(path, safe='/')}?ref={quote(resolved_branch)}"
+    try:
+        payload = _github_request(url)
+    except HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise
+    return str(payload.get("sha") or "").strip() or None
+
+
+def _publish_report_post_to_github(path: str, content: str, *, repo: str | None = None, branch: str | None = None) -> str:
+    resolved_repo = (repo or GITHUB_REPO or "").strip()
+    resolved_branch = (branch or GITHUB_BRANCH or "main").strip() or "main"
+    if not GITHUB_TOKEN:
+        raise RuntimeError("missing_github_token")
+    if not resolved_repo:
+        raise RuntimeError("missing_github_repo")
+
+    sha = _github_existing_file_sha(path, repo=resolved_repo, branch=resolved_branch)
+    payload = {
+        "message": f"Save report post: {Path(path).name}",
+        "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+        "branch": resolved_branch,
+    }
+    if sha:
+        payload["sha"] = sha
+
+    url = f"https://api.github.com/repos/{resolved_repo}/contents/{quote(path, safe='/')}"
+    result = _github_request(url, method="PUT", payload=payload)
+    content_payload = result.get("content") or {}
+    html_url = str(content_payload.get("html_url") or "").strip()
+    return html_url or _github_blob_url(path, repo=resolved_repo, branch=resolved_branch)
+
+
 def _report_run_dir_for_trend(trend: str) -> Path:
     REPORT_RUNS_DIR.mkdir(exist_ok=True)
     base_name = f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}-{_slugify(trend, 'trend')[:60]}"
@@ -2186,12 +2338,47 @@ def generate_report(conn, trend):
     final_report = revise(trend, draft, citation_report, chunk_json, run_dir)
 
     # ── Save ──
+    created_at = datetime.now(UTC)
+    report_category = _report_category(trend, final_report)
+    github_post_path = _report_post_relative_path(trend, created_at)
+    github_post_content = _report_post_content(
+        trend,
+        final_report,
+        created_at=created_at,
+        category=report_category,
+    )
+    local_post_path = ROOT / github_post_path
+    _write_text(local_post_path, github_post_content)
+
+    github_url = ""
+    github_publish_error = ""
+    if GITHUB_TOKEN and GITHUB_REPO:
+        try:
+            github_url = _publish_report_post_to_github(github_post_path, github_post_content)
+        except Exception as exc:
+            github_publish_error = str(exc)
+            log.error("GitHub report publish failed for %s: %s", github_post_path, exc, exc_info=True)
+            raise
+    else:
+        github_publish_error = "github_not_configured"
+        log.warning(
+            "Skipping GitHub report publish for %s because GITHUB_TOKEN or GITHUB_REPO is not configured",
+            github_post_path,
+        )
+
     metadata = json.dumps({
         "complexity": complexity,
         "angles": [r["angle"] for r in all_subagent_results],
         "total_chunks": len(all_chunks),
         "research_rounds": research_round + 1,
         "report_run_dir": str(run_dir),
+        "summary": _report_summary(final_report),
+        "category": report_category,
+        "github_path": github_post_path,
+        "github_repo": GITHUB_REPO,
+        "github_branch": GITHUB_BRANCH,
+        "url": github_url,
+        "github_publish_error": github_publish_error or None,
         "models": {
             "lead": LEAD_MODEL,
             "eval": EVAL_MODEL,
@@ -2207,12 +2394,14 @@ def generate_report(conn, trend):
                     (trend, final_report, metadata))
         conn.commit()
 
-    slug = re.sub(r"[^a-z0-9]+", "-", trend.lower()).strip("-")[:60]
-    out = ROOT / "reports" / f"{datetime.now().strftime('%Y-%m-%d')}-{slug}.md"
-    out.parent.mkdir(exist_ok=True)
-    out.write_text(final_report)
-    log.info("Report saved: %s (%d chunks, %d angles, %d rounds)",
-             out, len(all_chunks), len(all_subagent_results), research_round + 1)
+    log.info(
+        "Report saved: %s github=%s (%d chunks, %d angles, %d rounds)",
+        local_post_path,
+        github_url or "not_published",
+        len(all_chunks),
+        len(all_subagent_results),
+        research_round + 1,
+    )
     return final_report
 
 
