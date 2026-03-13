@@ -1546,7 +1546,8 @@ def _detect_trends_llm_only(conn, past) -> tuple[list[dict], bool]:
             "Return ONLY valid JSON. No markdown. No code fences. No prose. Use double quotes.\n"
             'Format: {"candidates": ['
             '{"trend": "<10-20 word description>", "reasoning": "<why novel>", "score": <0-100>, "source_titles": ["<exact title>"]}'
-            ', ...]}'
+            ', ...]}',
+            model=SIGNAL_MODEL,
         )
         log.info("LLM-only trend detection raw response: %r", text)
         candidates = parse_json(text).get("candidates", [])
