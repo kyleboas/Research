@@ -697,6 +697,11 @@ def describe_signals_with_llm(conn, signals, ask_fn, past_topics=None):
 
 def _parse_json_safe(text):
     """Extract JSON from LLM response text."""
+    if isinstance(text, (dict, list)):
+        return text
+    if text is None:
+        return {}
+
     stripped = text.strip()
     try:
         return json.loads(stripped)
