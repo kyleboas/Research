@@ -42,12 +42,15 @@ The report stage selects top pending candidates that pass quality gates and then
 - synthesis,
 - sufficiency check (+ optional second round),
 - citation verification,
-- final revision.
+- final revision,
+- persistent report artifacts (lead plan, subagent briefs, draft, citation review).
 
 Final reports are saved to:
 
 - Postgres table `reports`, and
 - local `reports/YYYY-MM-DD-<slug>.md`.
+
+Each report run also writes a persistent artifact bundle under `report_runs/<timestamp>-<slug>/` so the lead plan and subagent outputs are stored outside the live prompt chain, following Anthropic's external-memory / artifact pattern.
 
 ## Architecture wireframe
 
@@ -89,10 +92,11 @@ Final reports are saved to:
 │                           Report Generation Layer                           │
 │  main.py::run_report / generate_report                                      │
 │   • quality gate (min score + source diversity)                             │
-│   • planner (LeadResearcher)                                                │
-│   • parallel OODA subagents                                                 │
+│   • planner (LeadResearcher) + persisted lead plan                          │
+│   • parallel OODA subagents + per-agent artifact bundles                    │
 │   • synthesis + sufficiency evaluation                                      │
 │   • citation verification + final revision                                  │
+│   • report_runs/ artifacts for replay/debugging                             │
 └────────────────────────────────┬─────────────────────────────────────────────┘
                                  │
                                  ▼

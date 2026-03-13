@@ -9,11 +9,15 @@ import main
 from main import (
     _compute_overlap_watermark,
     _effective_source_diversity,
+    _normalize_subagent_task,
     _parse_rescore_statuses,
     _parse_iso_datetime,
     _rescored_trend_candidate_values,
+    chunk_records_to_context,
+    collect_all_chunks,
     build_source_dedupe_values,
     canonicalize_url,
+    chunk_rows_to_records,
     fetch_newsblur,
     fetch_youtube,
     normalize_text_for_hash,
@@ -98,6 +102,77 @@ class PipelineHelperTests(unittest.TestCase):
         self.assertEqual(first["canonical_url"], "https://example.com/a")
         self.assertEqual(first["url_hash"], second["url_hash"])
         self.assertEqual(first["content_hash"], second["content_hash"])
+
+    def test_chunk_rows_to_records_and_context_are_json_serializable(self):
+        rows = [
+            (11, 7, "Evidence text", "Source Title", "https://example.com/a", 0.82),
+        ]
+
+        records = chunk_rows_to_records(rows)
+        self.assertEqual(
+            records,
+            [
+                {
+                    "chunk_id": 11,
+                    "source_id": 7,
+                    "content": "Evidence text",
+                    "source_title": "Source Title",
+                    "source_url": "https://example.com/a",
+                    "score": 0.82,
+                }
+            ],
+        )
+        payload = json.loads(chunk_records_to_context(records))
+        self.assertEqual(payload[0]["chunk_id"], 11)
+        self.assertEqual(payload[0]["source_title"], "Source Title")
+
+    def test_collect_all_chunks_reads_persisted_subagent_artifacts_and_dedupes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            first = base / "first.json"
+            second = base / "second.json"
+            first.write_text(
+                json.dumps(
+                    [
+                        {"chunk_id": 1, "source_id": 10, "content": "A", "source_title": "T1", "source_url": "u1"},
+                        {"chunk_id": 2, "source_id": 11, "content": "B", "source_title": "T2", "source_url": "u2"},
+                    ]
+                )
+            )
+            second.write_text(
+                json.dumps(
+                    [
+                        {"chunk_id": 2, "source_id": 11, "content": "B newer", "source_title": "T2", "source_url": "u2"},
+                        {"chunk_id": 3, "source_id": 12, "content": "C", "source_title": "T3", "source_url": "u3"},
+                    ]
+                )
+            )
+
+            combined = collect_all_chunks(
+                [
+                    {"evidence_path": str(first)},
+                    {"evidence_path": str(second)},
+                ]
+            )
+
+        self.assertEqual([record["chunk_id"] for record in combined], [1, 2, 3])
+        self.assertEqual(next(record for record in combined if record["chunk_id"] == 2)["content"], "B newer")
+
+    def test_normalize_subagent_task_adds_required_delegation_fields(self):
+        task = _normalize_subagent_task(
+            {"angle": "Recruitment", "search_queries": ["club recruitment trend"]},
+            2,
+            "Midfield diamond resurgence",
+            "moderate",
+        )
+
+        self.assertEqual(task["task_order"], 2)
+        self.assertEqual(task["angle"], "Recruitment")
+        self.assertTrue(task["objective"].startswith("Find the strongest evidence"))
+        self.assertEqual(task["search_queries"], ["club recruitment trend"])
+        self.assertIn("markdown brief", task["output_format"])
+        self.assertIn("recent", task["search_guidance"])
+        self.assertEqual(task["max_rounds"], 3)
 
     def test_trend_fingerprint_normalizes_punctuation_and_case(self):
         self.assertEqual(normalize_trend_text("High Press in Build-Up!!"), "high press in build up")
