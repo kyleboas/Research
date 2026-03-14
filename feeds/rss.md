@@ -458,11 +458,7 @@
   - Feed: https://www.theguardian.com/profile/sidlowe/rss
   - Site: https://www.theguardian.com/profile/sidlowe
 
-## 6. Other Sports
-
-- **ALLABOUTFPL**
-  - Feed: https://allaboutfpl.com/feed/
-  - Site: https://allaboutfpl.com/
+## 6. Other
 
 - **The Players Tribune Feed**
   - Feed: https://www.theplayerstribune.com/posts.rss
