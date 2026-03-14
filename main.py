@@ -9,12 +9,12 @@ Architecture mirrors Anthropic's production research system:
 import argparse, base64, hashlib, json, logging, math, os, random, re, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
-from http.cookiejar import CookieJar
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Optional
 from urllib.error import HTTPError
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
-from urllib.request import Request, urlopen, build_opener, HTTPCookieProcessor
+from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
 import openai, psycopg
@@ -54,8 +54,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
-NEWSBLUR_USERNAME = os.environ.get("NEWSBLUR_USERNAME", "")
-NEWSBLUR_PASSWORD = os.environ.get("NEWSBLUR_PASSWORD", "")
 
 # ── Cloudflare AI Gateway ──────────────────────────────────────────────────────
 CLOUDFLARE_GATEWAY_URL = os.environ.get("CLOUDFLARE_GATEWAY_URL", "")
@@ -106,12 +104,12 @@ EVAL_MODEL      = os.environ.get("EVAL_MODEL")      or _CFG.get("eval_model",   
 def _validate_required_env(step: str):
     common_required = ["CLOUDFLARE_GATEWAY_URL", "CLOUDFLARE_GATEWAY_TOKEN"]
     step_required = {
-        "ingest": common_required + ["NEWSBLUR_USERNAME", "NEWSBLUR_PASSWORD"],
+        "ingest": common_required,
         "backfill": common_required,
         "detect": common_required,
         "rescore": common_required,
         "report": common_required,
-        "all": common_required + ["NEWSBLUR_USERNAME", "NEWSBLUR_PASSWORD"],
+        "all": common_required,
     }
     missing = [name for name in step_required.get(step, []) if not os.environ.get(name)]
     if missing:
@@ -452,8 +450,43 @@ SYS_SUFFICIENCY = (
 )
 
 # ══════════════════════════════════════════════
-# Feed parsing (YouTube only)
+# Feed parsing
 # ══════════════════════════════════════════════
+
+def parse_rss(path):
+    text = path.read_text()
+    pairs = []
+    seen_urls = set()
+    current_name = ""
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith(">"):
+            continue
+
+        match = re.match(r"^(.+?):\s*(https?://\S+)$", line)
+        if match and not line.startswith("- "):
+            name = match.group(1).strip()
+            feed_url = match.group(2).strip()
+            if feed_url not in seen_urls:
+                pairs.append((name, feed_url))
+                seen_urls.add(feed_url)
+            current_name = ""
+            continue
+
+        name_match = re.match(r"^-\s+\*\*(.+?)\*\*\s*$", line)
+        if name_match:
+            current_name = name_match.group(1).strip()
+            continue
+
+        feed_match = re.match(r"^-\s+Feed:\s*(https?://\S+)\s*$", line)
+        if feed_match and current_name:
+            feed_url = feed_match.group(1).strip()
+            if feed_url not in seen_urls:
+                pairs.append((current_name, feed_url))
+                seen_urls.add(feed_url)
+
+    return pairs
 
 def parse_youtube(path):
     text = path.read_text()
@@ -557,82 +590,151 @@ def trend_fingerprint(trend: str) -> str:
     return trend_fingerprint_impl(trend)
 
 # ══════════════════════════════════════════════
-# NewsBlur RSS ingestion
+# RSS ingestion
 # ══════════════════════════════════════════════
+
+RSS_XML_NAMESPACES = {
+    "atom": "http://www.w3.org/2005/Atom",
+    "content": "http://purl.org/rss/1.0/modules/content/",
+    "dc": "http://purl.org/dc/elements/1.1/",
+}
+RSS_FEED_USER_AGENT = "ResearchBot/1.0"
+RSS_UNDATED_ITEM_LIMIT = 3
 
 def _get(url, headers=None, timeout=15):
     req = Request(url, headers=headers or {"User-Agent": "ResearchBot/1.0"})
     with urlopen(req, timeout=timeout) as r:
         return r.read()
 
-def _newsblur_session():
-    """Login to NewsBlur and return a cookie-enabled URL opener."""
-    jar = CookieJar()
-    opener = build_opener(HTTPCookieProcessor(jar))
-    data = urlencode({"username": NEWSBLUR_USERNAME, "password": NEWSBLUR_PASSWORD}).encode()
-    req = Request("https://newsblur.com/api/login", data=data)
-    req.add_header("Content-Type", "application/x-www-form-urlencoded")
-    req.add_header("User-Agent", "ResearchBot/1.0")
-    with opener.open(req, timeout=15) as r:
-        result = json.loads(r.read())
-    if not result.get("authenticated"):
-        raise RuntimeError(f"NewsBlur login failed: {result.get('errors', result)}")
-    return opener
+def _rss_entry_datetime(entry):
+    for path in (
+        "pubDate",
+        "published",
+        "updated",
+        "atom:published",
+        "atom:updated",
+        "dc:date",
+    ):
+        raw = (entry.findtext(path, default="", namespaces=RSS_XML_NAMESPACES) or "").strip()
+        if not raw:
+            continue
+        try:
+            if path == "pubDate":
+                dt = parsedate_to_datetime(raw)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=UTC)
+                return dt.astimezone(UTC)
+            return _parse_iso_datetime(raw)
+        except Exception:
+            continue
+    return None
 
-def fetch_newsblur(since_ts=None):
-    """Fetch recent stories from NewsBlur river of news.
 
-    Treats RSS as discovery: fetches the feed for URLs and metadata, then
-    uses full-text extraction to get the actual article body when the RSS
-    content looks truncated (< 500 words).
+def _rss_entry_link(entry):
+    link = (entry.findtext("link", default="") or "").strip()
+    if link:
+        return link
+    for node in entry.findall("atom:link", RSS_XML_NAMESPACES):
+        href = str(node.attrib.get("href") or "").strip()
+        rel = str(node.attrib.get("rel") or "alternate").strip()
+        if href and rel in {"", "alternate"}:
+            return href
+    return ""
 
-    Args:
-        since_ts: Optional Unix timestamp (int/float). When provided, only
-                  stories newer than this time are fetched via NewsBlur's
-                  ``newer_than`` parameter so repeat runs don't re-process
-                  stories that were already ingested.
-    """
-    try:
-        opener = _newsblur_session()
-    except Exception as e:
-        log.warning("NewsBlur login failed: %s", e)
-        return []
-    try:
-        url = "https://newsblur.com/reader/river_stories?read_filter=all&order=newest&limit=100"
-        if since_ts is not None:
-            url += f"&newer_than={int(since_ts)}"
-        req = Request(url)
-        req.add_header("User-Agent", "ResearchBot/1.0")
-        with opener.open(req, timeout=30) as r:
-            data = json.loads(r.read())
-    except Exception as e:
-        log.warning("NewsBlur river fetch failed: %s", e)
-        return []
+
+def _rss_entry_summary(entry):
+    for path in (
+        "content:encoded",
+        "description",
+        "summary",
+        "atom:content",
+        "atom:summary",
+    ):
+        raw = entry.findtext(path, default="", namespaces=RSS_XML_NAMESPACES)
+        text = strip_html(raw or "")
+        if text:
+            return text
+    return ""
+
+
+def _rss_entry_author(entry):
+    author = (entry.findtext("dc:creator", default="", namespaces=RSS_XML_NAMESPACES) or "").strip()
+    if author:
+        return author
+    author = (entry.findtext("author", default="") or "").strip()
+    if author:
+        return author
+    return (entry.findtext("atom:author/atom:name", default="", namespaces=RSS_XML_NAMESPACES) or "").strip()
+
+
+def _rss_feed_title(root):
+    if root.tag == f"{{{RSS_XML_NAMESPACES['atom']}}}feed":
+        return (root.findtext("atom:title", default="", namespaces=RSS_XML_NAMESPACES) or "").strip()
+    return (root.findtext("./channel/title", default="") or "").strip()
+
+
+def _rss_feed_entries(root):
+    if root.tag == f"{{{RSS_XML_NAMESPACES['atom']}}}feed":
+        return root.findall("atom:entry", RSS_XML_NAMESPACES)
+    entries = root.findall("./channel/item")
+    return entries if entries else root.findall("item")
+
+
+def _rss_source_key(feed_url, entry_id, entry_url, title, published_at):
+    identity = entry_id or canonicalize_url(entry_url) or f"{title}|{published_at or ''}"
+    return f"rss:{_sha256_text(feed_url + '|' + identity)}"
+
+
+def _fetch_rss_feed_items(feed_name, feed_url, since_dt=None):
+    req = Request(feed_url, headers={"User-Agent": RSS_FEED_USER_AGENT, "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.8"})
+    with urlopen(req, timeout=30) as response:
+        xml_body = response.read()
+
+    root = ET.fromstring(xml_body)
+    feed_title = _rss_feed_title(root) or feed_name
     items = []
-    for story in data.get("stories", []):
-        title = (story.get("story_title") or "").strip()
-        url = (story.get("story_permalink") or "").strip()
-        rss_content = strip_html(story.get("story_content") or story.get("story_summary") or "")
-        story_id = str(story.get("id") or url).strip()
-        feed_id = str(story.get("story_feed_id") or "").strip()
+    undated_items = 0
+
+    for entry in _rss_feed_entries(root):
+        published_at = _rss_entry_datetime(entry)
+        if since_dt and published_at and published_at <= since_dt:
+            continue
+        if since_dt and published_at is None:
+            if undated_items >= RSS_UNDATED_ITEM_LIMIT:
+                continue
+            undated_items += 1
+
+        title = (entry.findtext("title", default="", namespaces=RSS_XML_NAMESPACES) or "").strip()
+        if not title:
+            title = (entry.findtext("atom:title", default="", namespaces=RSS_XML_NAMESPACES) or "").strip()
+        url = _rss_entry_link(entry)
+        if not url:
+            continue
+
+        rss_content = _rss_entry_summary(entry)
         content = rss_content
-        author = None
-        publish_date = None
-        sitename = None
+        author = _rss_entry_author(entry) or None
+        publish_date = published_at.date().isoformat() if published_at else None
+        sitename = feed_title or None
         extraction_method = "rss"
 
-        should_attempt_extraction = bool(url) and (not rss_content or should_extract(url, rss_content))
+        should_attempt_extraction = not rss_content or should_extract(url, rss_content)
         if should_attempt_extraction:
             try:
                 article = extract_article(url, fallback_content=rss_content)
                 if len(article["content"]) > len(content):
                     content = article["content"]
                     extraction_method = article["extraction_method"]
-                    log.info("Full-text extraction improved %s: %d→%d chars (%s)",
-                             title[:40], len(rss_content), len(content), extraction_method)
-                author = article.get("author")
-                publish_date = article.get("publish_date")
-                sitename = article.get("sitename")
+                    log.info(
+                        "Full-text extraction improved %s: %d→%d chars (%s)",
+                        title[:40],
+                        len(rss_content),
+                        len(content),
+                        extraction_method,
+                    )
+                author = article.get("author") or author
+                publish_date = article.get("publish_date") or publish_date
+                sitename = article.get("sitename") or sitename
                 if article.get("title") and not title:
                     title = article["title"]
             except Exception as e:
@@ -641,16 +743,55 @@ def fetch_newsblur(since_ts=None):
         if not content:
             continue
 
-        items.append({
-            "title": title,
-            "url": url,
-            "content": content,
-            "key": f"nb:{feed_id}:{story_id}",
-            "author": author,
-            "publish_date": publish_date,
-            "sitename": sitename,
-            "extraction_method": extraction_method,
-        })
+        entry_id = (
+            (entry.findtext("guid", default="") or "").strip()
+            or (entry.findtext("id", default="", namespaces=RSS_XML_NAMESPACES) or "").strip()
+            or (entry.findtext("atom:id", default="", namespaces=RSS_XML_NAMESPACES) or "").strip()
+        )
+        items.append(
+            {
+                "title": title,
+                "url": url,
+                "content": content,
+                "key": _rss_source_key(feed_url, entry_id, url, title, published_at.isoformat() if published_at else ""),
+                "author": author,
+                "publish_date": publish_date,
+                "sitename": sitename,
+                "extraction_method": extraction_method,
+                "published_at": published_at.isoformat() if published_at else "",
+            }
+        )
+
+    return items
+
+
+def fetch_rss(since_ts=None):
+    """Fetch recent stories directly from configured RSS/Atom feeds.
+
+    RSS is treated as discovery: feed entries provide item URLs and basic
+    metadata, then article extraction fetches the linked page for full text.
+    """
+    since_dt = datetime.fromtimestamp(float(since_ts), tz=UTC) if since_ts is not None else None
+    feeds = parse_rss(ROOT / "feeds" / "rss.md")
+    if not feeds:
+        log.warning("No RSS feeds configured in %s", ROOT / "feeds" / "rss.md")
+        return []
+
+    items = []
+    max_workers = max(1, min(8, len(feeds)))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {
+            executor.submit(_fetch_rss_feed_items, feed_name, feed_url, since_dt): (feed_name, feed_url)
+            for feed_name, feed_url in feeds
+        }
+        for future in as_completed(future_map):
+            feed_name, feed_url = future_map[future]
+            try:
+                items.extend(future.result())
+            except Exception as e:
+                log.warning("RSS fetch failed for %s (%s): %s", feed_name, feed_url, e)
+
+    items.sort(key=lambda item: item.get("published_at") or "", reverse=True)
     return items
 
 # ══════════════════════════════════════════════
@@ -2735,7 +2876,7 @@ def run_ingest(conn):
             if watermark is not None:
                 since_ts = watermark.timestamp()
                 log.info(
-                    "Fetching NewsBlur stories newer_than=%s (last_completed=%s overlap=%ss)",
+                    "Fetching RSS items newer_than=%s (last_completed=%s overlap=%ss)",
                     int(since_ts),
                     last_completed,
                     RSS_OVERLAP_SECONDS,
@@ -2743,7 +2884,7 @@ def run_ingest(conn):
         except Exception as e:
             log.warning("Could not parse last_ingest_completed_at %r: %s — fetching all stories", last_completed, e)
 
-    for item in fetch_newsblur(since_ts=since_ts):
+    for item in fetch_rss(since_ts=since_ts):
         candidates_found += 1
         articles_extracted += 1
         item.update(build_source_dedupe_values(item))

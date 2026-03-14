@@ -13,8 +13,10 @@ Also extracts structured metadata: author, publish date, sitename, etc.
 import logging
 import re
 from datetime import datetime
+from urllib.parse import quote
 
 log = logging.getLogger("research")
+DEFUDDLE_BASE_URL = "https://defuddle.md/"
 
 # Lazy imports — these are optional dependencies that gracefully degrade
 _trafilatura = None
@@ -55,11 +57,102 @@ def _fetch_html(url, timeout=20):
         return r.read()
 
 
+def _fetch_markdown(url, timeout=20):
+    from urllib.request import Request, urlopen
+    req = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; ResearchBot/2.0; +football-tactics-research)",
+            "Accept": "text/markdown,text/plain;q=0.9,*/*;q=0.8",
+            "Accept-Language": "*",
+        },
+    )
+    with urlopen(req, timeout=timeout) as r:
+        return r.read().decode("utf-8", errors="replace")
+
+
 def _strip_html(html):
     """Basic HTML tag stripping as last resort."""
     if isinstance(html, bytes):
         html = html.decode("utf-8", errors="replace")
     return re.sub(r"<[^>]+>", "", html).strip()
+
+
+def _parse_markdown_frontmatter(markdown):
+    if not markdown.startswith("---\n"):
+        return {}, markdown
+    end = markdown.find("\n---\n", 4)
+    if end == -1:
+        return {}, markdown
+    metadata = {}
+    for raw_line in markdown[4:end].splitlines():
+        if ":" not in raw_line:
+            continue
+        key, value = raw_line.split(":", 1)
+        cleaned = value.strip()
+        if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {"'", '"'}:
+            cleaned = cleaned[1:-1]
+        metadata[key.strip()] = cleaned
+    return metadata, markdown[end + len("\n---\n") :]
+
+
+def _clean_markdown_article(text):
+    cleaned = str(text or "")
+    cleaned = re.sub(r"```.*?```", " ", cleaned, flags=re.S)
+    cleaned = re.sub(r"!\[[^\]]*\]\([^)]+\)", " ", cleaned)
+    cleaned = re.sub(r"\[(.*?)\]\([^)]+\)", r"\1", cleaned)
+    cleaned = re.sub(r"^\s{0,3}#{1,6}\s*", "", cleaned, flags=re.M)
+    cleaned = re.sub(r"^\s*>\s?", "", cleaned, flags=re.M)
+    cleaned = re.sub(r"^\s*[-*+]\s+", "", cleaned, flags=re.M)
+    cleaned = re.sub(r"^\s*\d+\.\s+", "", cleaned, flags=re.M)
+    cleaned = re.sub(r"\*\*(.*?)\*\*", r"\1", cleaned)
+    cleaned = re.sub(r"__(.*?)__", r"\1", cleaned)
+    cleaned = re.sub(r"`([^`]*)`", r"\1", cleaned)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def _normalize_publish_date(raw):
+    value = str(raw or "").strip()
+    if not value:
+        return None
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(value).date().isoformat()
+    except ValueError:
+        match = re.match(r"^(\d{4}-\d{2}-\d{2})", value)
+        return match.group(1) if match else None
+
+
+def _defuddle_markdown_url(url):
+    return f"{DEFUDDLE_BASE_URL}{quote(str(url or '').strip(), safe=':/?&=#')}"
+
+
+def _extract_defuddle_article(url):
+    markdown = _fetch_markdown(_defuddle_markdown_url(url))
+    metadata, body = _parse_markdown_frontmatter(markdown)
+    content = _clean_markdown_article(body)
+    if len(content) <= 200:
+        return None
+    return {
+        "content": content,
+        "author": str(metadata.get("author") or "").strip() or None,
+        "publish_date": _normalize_publish_date(
+            metadata.get("published")
+            or metadata.get("publish_date")
+            or metadata.get("date")
+        ),
+        "sitename": str(
+            metadata.get("sitename")
+            or metadata.get("site_name")
+            or metadata.get("source")
+            or ""
+        ).strip() or None,
+        "title": str(metadata.get("title") or "").strip() or None,
+        "extraction_method": "defuddle",
+    }
 
 
 def extract_article(url, fallback_content=None):
@@ -89,6 +182,15 @@ def extract_article(url, fallback_content=None):
 
     if not url:
         return result
+
+    try:
+        defuddled = _extract_defuddle_article(url)
+        if defuddled:
+            result.update(defuddled)
+            log.debug("defuddle extracted %d chars from %s", len(result["content"]), url)
+            return result
+    except Exception as e:
+        log.debug("defuddle failed for %s: %s", url, e)
 
     # Fetch the HTML
     try:
