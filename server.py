@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from html import escape
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
@@ -64,6 +64,14 @@ RUN_COMMANDS = {
     ],
 }
 _run_lock = Lock()
+
+# (step, predicate(hour, minute) -> bool) — all times UTC
+_CRON_JOBS = [
+    ("ingest", lambda h, m: m == 0),
+    ("detect", lambda h, m: m == 0 and h % 6 == 0),
+    ("report", lambda h, m: m == 0 and h == 1),
+    ("autoresearch_hourly", lambda h, m: m == 15),
+]
 
 
 def _empty_step_run_state():
@@ -882,7 +890,7 @@ def _step_runs_snapshot():
         return {k: dict(v) for k, v in _step_runs.items()}
 
 
-def _start_step_run(step):
+def _start_step_run(step, trigger_source="dashboard"):
     _refresh_step_runs()
     with _run_lock:
         if step not in RUN_COMMANDS:
@@ -909,7 +917,7 @@ def _start_step_run(step):
                     run_meta["db_run"] = start_run(
                         conn,
                         step=step,
-                        trigger_source="dashboard",
+                        trigger_source=trigger_source,
                         started_at=started_at,
                     )
                     conn.commit()
@@ -921,7 +929,7 @@ def _start_step_run(step):
             env={
                 **os.environ.copy(),
                 "PIPELINE_DISABLE_SELF_LOGGING": "1",
-                "PIPELINE_TRIGGER_SOURCE": "dashboard",
+                "PIPELINE_TRIGGER_SOURCE": trigger_source,
             },
             stdout=log_file,
             stderr=subprocess.STDOUT,
@@ -939,6 +947,25 @@ def _start_step_run(step):
             "log_tail": "",
         }
         return True, None
+
+
+def _scheduler_loop():
+    import time
+
+    while True:
+        now = utc_now()
+        seconds_to_next_minute = 60 - now.second - now.microsecond / 1_000_000
+        time.sleep(seconds_to_next_minute + 0.5)  # wake just after the minute boundary
+
+        now = utc_now()
+        h, m = now.hour, now.minute
+        for step, predicate in _CRON_JOBS:
+            if predicate(h, m):
+                ok, reason = _start_step_run(step, trigger_source="scheduler")
+                if ok:
+                    print(f"[scheduler] started {step} at {now.isoformat()}", flush=True)
+                else:
+                    print(f"[scheduler] skipped {step}: {reason}", flush=True)
 
 
 class DashboardHandler(SimpleHTTPRequestHandler):
@@ -1705,6 +1732,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    Thread(target=_scheduler_loop, daemon=True, name="cron-scheduler").start()
     httpd = HTTPServer(("0.0.0.0", PORT), DashboardHandler)
     print(f"Serving dashboard at http://0.0.0.0:{PORT}/")
     httpd.serve_forever()

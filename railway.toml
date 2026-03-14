@@ -1,22 +1,6 @@
 [build]
 builder = "nixpacks"
 
-[deploy.service.web]
+[deploy]
 startCommand = "python server.py"
 restartPolicyType = "always"
-
-[deploy.service.ingest]
-startCommand = "python main.py --step ingest"
-cron = "0 * * * *"
-
-[deploy.service.detect]
-startCommand = "python main.py --step detect"
-cron = "0 */6 * * *"
-
-[deploy.service.report]
-startCommand = "python main.py --step report"
-cron = "0 1 * * *"
-
-[deploy.service.autoresearch]
-startCommand = "python autoresearch/pipeline.py"
-cron = "15 * * * *"
