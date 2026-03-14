@@ -1,52 +1,22 @@
 [build]
 builder = "nixpacks"
 
-[deploy]
-# Each Railway service reads PIPELINE_STEP from its environment variables.
-# Create four services in the Railway dashboard, all pointing to this repo:
-#
-#   Service: web  (serves the dashboard at /)
-#     Start command: python server.py
-#     No cron schedule — this runs continuously as a web server
-#     Add a public domain in Railway so it is reachable at your custom URL
-#
-#   Service: ingest
-#     PIPELINE_STEP=ingest
-#     Cron schedule: 0 * * * *     (every hour, top of hour)
-#
-#   Service: detect
-#     PIPELINE_STEP=detect
-#     Cron schedule: 0 */6 * * *   (every 6 hours)
-#
-#   Service: report
-#     PIPELINE_STEP=report
-#     Cron schedule: 0 1 * * *     (daily at 8pm EST / 01:00 UTC)
-#
-#   Service: autoresearch
-#     PIPELINE_STEP=autoresearch_hourly
-#     Cron schedule: 15 * * * *    (hourly, offset from ingest)
-#
-# Set these variables in Railway's Variables tab for all three services:
-#
-#   DATABASE_URL              ${{pgvector.DATABASE_URL}}   ← Railway reference variable
-#   CLOUDFLARE_GATEWAY_URL    https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_name}/openai
-#   CLOUDFLARE_GATEWAY_TOKEN  your-cloudflare-ai-gateway-token
-#
-# Optional per-service extra CLI flags:
-#   PIPELINE_FLAGS            --min-new-sources-for-detect=5   (detect service example)
-#
-# Optional manual/cron quality jobs you can also run from this same repo:
-#   - report quality eval: python autoresearch/report/eval_report.py --refresh-auto
-#   - report policy benchmark: python autoresearch/report/benchmark_report.py --refresh-auto --limit 3
-#   - report policy optimize: python autoresearch/report/optimize_report_policy.py --refresh-auto --limit 3
-#   - detect policy eval:  python autoresearch/detect/eval_detect.py
-#   - detect policy tune:  python autoresearch/detect/optimize_detect_policy.py --refresh-auto --apply
-#
-# Avoid --step all in production. If you intentionally need full same-process
-# execution, set PIPELINE_STEP=all and PIPELINE_FLAGS=--allow-report-after-detect.
-#
-# After first deploy, run sql/schema.sql via Railway's Postgres query console
-# (or psql) to create the tables.
+[deploy.service.web]
+startCommand = "python server.py"
+restartPolicyType = "always"
 
-startCommand = "bash -lc 'export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6${LD_PRELOAD:+:${LD_PRELOAD}}; if [ -z \"${PIPELINE_STEP}\" ] || [ \"${PIPELINE_STEP}\" = \"web\" ]; then python server.py; elif [ \"${PIPELINE_STEP}\" = \"autoresearch_hourly\" ]; then python autoresearch/pipeline.py; else python main.py --step \"${PIPELINE_STEP}\" ${PIPELINE_FLAGS}; fi'"
-restartPolicyType = "never"
+[deploy.service.ingest]
+startCommand = "python main.py --step ingest"
+cron = "0 * * * *"
+
+[deploy.service.detect]
+startCommand = "python main.py --step detect"
+cron = "0 */6 * * *"
+
+[deploy.service.report]
+startCommand = "python main.py --step report"
+cron = "0 1 * * *"
+
+[deploy.service.autoresearch]
+startCommand = "python autoresearch/pipeline.py"
+cron = "15 * * * *"
